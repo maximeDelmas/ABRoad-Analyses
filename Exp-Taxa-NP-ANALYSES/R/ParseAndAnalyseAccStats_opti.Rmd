@@ -1,0 +1,255 @@
+---
+title: "Parse and analyse Acc Stats - Opti"
+author: "Maxime Delmas"
+date: "2023-02-09"
+output: 
+  html_document:
+    css: style.css
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(DT)
+```
+
+# Parse file
+-> Alors j'ai du rajotuer une ligne à la fin pour que tous les blocks est bien une longueurs de 8 lignes.
+```{r}
+path <- "output/np/opti/summary_ACC.txt"
+block_l <- 8
+data <- data.frame()
+
+# read lines:
+lines <- readLines(path)
+n_block <- length(lines) / block_l
+
+parsed_data <- data.frame()
+
+block_start_index <- seq(1, length(lines), block_l)
+
+for(i in 1:n_block){
+  
+  # get block
+  block <- lines[block_start_index[i]:(block_start_index[i] + block_l - 1)]
+  
+  # get metadata
+  metadata <- strsplit(block[1], "/")[[1]]
+  model <- metadata[4]
+  prompt <- metadata[5]
+  init <- metadata[6]
+  iter <- metadata[7]
+  
+  prop1acc <- strsplit(block[4], "\t")[[1]]
+  prop2acc <- strsplit(block[5], "\t")[[1]]
+  
+  subdata <- data.frame(model = model, prompt = prompt, init = init, iter = iter, property = c("P703", "P703", "rP703", "rP703"), accType = c("Acc@1", "Acc@5", "Acc@1", "Acc@5"), acc = c(prop1acc[2], prop1acc[3], prop2acc[2], prop2acc[3]))
+  
+  parsed_data <- rbind(parsed_data, subdata)
+}
+
+parsed_data$model <- factor(parsed_data$model, levels = c("ChemicalBERT", "BioBERT", "PubMedBERT", "PubMedBERT-full"))
+parsed_data$prompt <- factor(parsed_data$prompt, levels = c("manual1", "manual2", "FS"))
+parsed_data$init <- factor(parsed_data$init, levels = c("independent", "order", "confidence"))
+parsed_data$iter <- factor(parsed_data$iter, levels = c("none", "order", "confidence"))
+
+parsed_data$acc <- as.numeric(parsed_data$acc)
+```
+
+
+# FIX:
+Au début on différenciait les prompt en fonctiond de la position du token [Y] à compléter, finalement cela n'a pas d'impact significatif, en revanche, c'est la structure du prompt: forne simple (The fungus [X/Y] produces the compound [X/Y].) ou plus complexe (he compound [X/Y] was isolated and identified from culture of the fungus [X/Y].) qui a une importance ! Afin aue cela deviennt le facteur aue l'on étudie dans l'analyse, on va corriger l'attribution de l'attribut manual1/2 pour la propriété P703 (Cf. Daily note 15/02/2012)
+
+```{r}
+parsed_data$prompt <- as.character(parsed_data$prompt)
+parsed_data[parsed_data$property == "P703" & parsed_data$prompt == "manual1", ]$prompt <- "toChange"
+parsed_data[parsed_data$property == "P703" & parsed_data$prompt == "manual2", ]$prompt <- "manual1"
+parsed_data[parsed_data$property == "P703" & parsed_data$prompt == "toChange", ]$prompt <- "manual2"
+parsed_data$prompt <- factor(parsed_data$prompt, levels = c("manual1", "manual2", "FS"))
+
+```
+
+
+## Property P703 & Acc@1 :
+```{r}
+s <- parsed_data[parsed_data$property == "P703" & parsed_data$accType == "Acc@1", ]
+DT::datatable(s, filter = 'top')
+```
+## Property P703 & Acc@5 :
+```{r}
+s <- parsed_data[parsed_data$property == "P703" & parsed_data$accType == "Acc@5", ]
+DT::datatable(s, filter = 'top')
+```
+## Property rP703 & Acc@1 :
+```{r}
+s <- parsed_data[parsed_data$property == "rP703" & parsed_data$accType == "Acc@1", ]
+DT::datatable(s, filter = 'top')
+```
+## Property rP703 & Acc@5 :
+```{r}
+s <- parsed_data[parsed_data$property == "rP703" & parsed_data$accType == "Acc@5", ]
+DT::datatable(s, filter = 'top')
+```
+
+
+Maintenant, pour chaque combinaison de propriétées [rP703, P703] et type d'Acc [Acc@1, Acc@5]
+
+```{r}
+for (prop in c("P703", "rP703")) {
+  for (accType in c("Acc@1", "Acc@5")) {
+    subdata <- parsed_data[parsed_data$property == prop & parsed_data$accType == accType, ]
+    
+    print(paste("PROPERTY =", prop, "AND ACCTYPE=", accType))
+    print(" -- Additives --")
+    print(summary(lm(formula = acc ~ model + prompt + init + iter, data = subdata)))
+  }
+}
+```
+
+
+L'intercepte représente ici les expérience où:
+  - Le modèle est: ChemicalBERT
+  - Le prompt est: manual1
+  - La méthode d'initialisation est: independent
+  - La méthode d'itération est: none
+
+Ainsi, les différents facteurs donne le "gain" ou la "perte" moyen associé à chacun des facteurs sur l'accuracy choisie. En effet, la valeur du coefficient correspond à la différences de moyenne observée, lorsque ce facteur est appliqué et lorsque tous les autres facteurs sont consodérés fixes.
+
+## Plots by groups
+
+```{r}
+max_func <- function(x){
+  return(data.frame(y = max(x) + 1, label = paste0("max = ",max(x))))
+}
+```
+
+### PLOT: Acc@1 et Acc@5 on property rP703 et P703 - by MODELS
+```{r  out.width="100%", fig.width = 24, fig.height = 16, message=FALSE}
+
+ggplot(data = parsed_data, aes(x = model, y = acc)) +
+  geom_boxplot() +
+  stat_summary(fun.data = max_func, geom = "text") +
+  theme_classic() +
+  facet_wrap(. ~ accType + property) +
+  theme(axis.text = element_text(size = 20), axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("Acc@1 et Acc@5 on property rP703 et P703 - by MODELS") +
+  ylim(c(0,10))
+
+```
+ * * * 
+Pour les autres paramètres, il y a globalement toujours 3 plots qui sont créées:
+
+L'un où l'on sépare simplement les résultats par Acc@1 ou Acc@5 / propriétée P703 ou rP703.
+
+Ensuite (et je trouve que c'est le mieux), on sépare également les plots par type de modèle. Comme on a pas non plus beaucoup de valeurs par combinaison de conditions, je trouvais que faire un boxplot c'était pas ouf ... donc je préfère aussi faire un barplot avec les moyennes indiquées.  
+
+### PLOT: Acc@1 et Acc@5 on property rP703 et P703 - by PROMPTS
+```{r  out.width="100%", fig.width = 24, fig.height = 16, message=FALSE}
+
+ggplot(data = parsed_data, aes(x = prompt, y = acc)) +
+  geom_boxplot() +
+  theme_classic() +
+  stat_summary(fun.data = max_func, geom = "text") +
+  facet_wrap(. ~ accType + property) +
+  theme(axis.text = element_text(size = 20), axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("Acc@1 et Acc@5 on property rP703 et P703 - by PROMPTS") +
+  ylim(c(0,10))
+
+ggplot(data = parsed_data, aes(x = prompt, y = acc)) +
+  geom_boxplot() +
+  theme_classic() +
+  stat_summary(fun.data = max_func, geom = "text") +
+  facet_wrap(model ~ accType + property) +
+  theme(axis.text = element_text(size = 20), axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("Acc@1 et Acc@5 on property rP703 et P703 - by PROMPTS x MODELS") +
+  ylim(c(0,10))
+
+# Car je trouve un faire un boxplot avec 9 points c'est pas ouf ....
+parsed_data %>% group_by(prompt, model, accType, property) %>% summarise(mean = round(mean(acc), 2)) %>% 
+  ggplot(aes(x = model, y = mean, fill = prompt)) +
+  geom_bar(stat = "identity", width = 0.5, position = "dodge") +
+  theme_classic() +
+  geom_text(aes(label=mean), position=position_dodge(width=0.5), vjust=-0.25,  size = 4) +
+  facet_wrap(accType ~ property) +
+  theme(axis.text = element_text(size = 20), text = element_text(size = 20)) +
+  ggtitle("Acc@1 et Acc@5 on property rP703 et P703 - by PROMPT x model") +
+  ylim(c(0,10))
+
+```
+ * * * 
+
+
+### PLOT: Acc@1 et Acc@5 on property rP703 et P703 - by INIT method
+```{r  out.width="100%", fig.width = 24, fig.height = 16, message=FALSE}
+
+ggplot(data = parsed_data, aes(x = init, y = acc)) +
+  geom_boxplot() +
+  theme_classic() +
+  stat_summary(fun.data = max_func, geom = "text") +
+  facet_wrap(. ~ accType + property) +
+  theme(axis.text = element_text(size = 20), axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("Acc@1 et Acc@5 on property rP703 et P703 - by INIT method") +
+  ylim(c(0,10))
+
+
+ggplot(data = parsed_data, aes(x = init, y = acc)) +
+  geom_boxplot() +
+  theme_classic() +
+  stat_summary(fun.data = max_func, geom = "text") +
+  facet_wrap(model ~ accType + property) +
+  theme(axis.text = element_text(size = 20), axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("Acc@1 et Acc@5 on property rP703 et P703 - by INIT method x MODEL") +
+  ylim(c(0,10))
+
+
+parsed_data %>% group_by(init, model, accType, property) %>% summarise(mean = round(mean(acc), 2)) %>% 
+  ggplot(aes(x = model, y = mean, fill = init)) +
+  geom_bar(stat = "identity", width = 0.5, position = "dodge") +
+  theme_classic() +
+  geom_text(aes(label=mean), position=position_dodge(width=0.5), vjust=-0.25, size = 4) +
+  facet_wrap(accType ~ property) +
+  theme(axis.text = element_text(size = 20), text = element_text(size = 20)) +
+  ggtitle("Acc@1 et Acc@5 on property rP703 et P703 - by INIT method x model") +
+  ylim(c(0,10))
+```
+ * * * 
+
+
+### PLOT: Acc@1 et Acc@5 on property rP703 et P703 + MODELS - by ITER method
+```{r  out.width="100%", fig.width = 24, fig.height = 16, message=FALSE}
+
+ggplot(data = parsed_data, aes(x = iter, y = acc)) +
+  geom_boxplot() +
+  theme_classic() +
+  stat_summary(fun.data = max_func, geom = "text") +
+  facet_wrap(. ~ accType + property) +
+  theme(axis.text = element_text(size = 20), axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("Acc@1 et Acc@5 on property rP703 et P703 - by ITER method") +
+  ylim(c(0,10))
+
+
+ggplot(data = parsed_data, aes(x = iter, y = acc)) +
+  geom_boxplot() +
+  theme_classic() +
+  stat_summary(fun.data = max_func, geom = "text") +
+  facet_wrap(model ~ accType + property) +
+  theme(axis.text = element_text(size = 20), axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("Acc@1 et Acc@5 on property rP703 et P703 - by ITER method x MODEL") +
+  ylim(c(0,10))
+
+
+
+parsed_data %>% group_by(iter, model, accType, property) %>% summarise(mean = round(mean(acc), 2)) %>% 
+  ggplot(aes(x = model, y = mean, fill = iter)) +
+  geom_bar(stat = "identity", width = 0.5, position = "dodge") +
+  theme_classic() +
+  geom_text(aes(label=mean), position=position_dodge(width=0.5), vjust=-0.25, size = 4) +
+  facet_wrap(accType ~ property) +
+  theme(axis.text = element_text(size = 20), text = element_text(size = 20)) +
+  ggtitle("Acc@1 et Acc@5 on property rP703 et P703 - by ITER method x model") +
+  ylim(c(0,10))
+
+```
+
+

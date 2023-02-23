@@ -1,0 +1,432 @@
+---
+title: "KG-NP-Analysis"
+author: "Maxime Delmas"
+date: "2023-01-16"
+output: 
+  html_document:
+    css: style.css
+---
+
+```{r}
+library(tidyverse)
+library(DT)
+```
+
+
+# SPARQL: Extract all Accepted Taxons:
+- file: taxon-ids-names.csv
+```{SQL}
+DEFINE input:inference "schema-inference-rules"
+
+SELECT distinct (STRAFTER(str(?g), "https://abroad/") as ?TAX_SOURCE) ?Accepted_ID ?name 
+FROM NAMED <https://abroad/gbif-taxonomy>
+FROM NAMED <https://abroad/mycobank-taxonomy>
+WHERE
+{
+  GRAPH ?g {
+    ?taxa a abroad:AcceptedTaxon ;
+          dwc:taxonID ?Accepted_ID ;
+         rdfs:label ?name .
+  }
+}
+```
+
+
+# SPARQL request: Extract all relations Accepted-Taxon fron Mycobank <--> PubChem compound
+- file: data/taxon-np-list.csv
+```{SQL}
+
+DEFINE input:inference "schema-inference-rules"
+
+
+SELECT (STRAFTER(str(?g), "https://abroad/") as ?TAX_SOURCE) ?rank ?Accepted_ID ?cpd_related_taxa_ID (STRAFTER(str(?NP), "http://rdf.ncbi.nlm.nih.gov/pubchem/compound/CID") as ?pubchemId) ?ref ?y
+WHERE
+{
+
+	# On récupère, par graphe de ressource taxonomique, l'ensemble des Accepted Taxons
+	{
+		SELECT ?g ?taxa ?rank
+		FROM NAMED <https://abroad/gbif-taxonomy>
+		FROM NAMED <https://abroad/mycobank-taxonomy>
+		WHERE
+		{
+			GRAPH ?g {
+			?taxa a abroad:AcceptedTaxon ;
+				dwc:taxonRank ?rank .
+			}
+		}
+	}
+	
+	# Selection de l'identifiant de l'AcceptedTaxon
+	?taxa dwc:taxonID ?Accepted_ID .
+	
+	# Traverser (si besoin) le lien vers un sysnonyme. Comme ça, on garde la référence de l'entité (Syn. or Accepted) qui est explicitement liée au composé
+	?taxa abroad:hasSynonymTaxon? ?cpd_related_taxa .
+	
+	# On récupère son identifiant
+	?cpd_related_taxa dwc:taxonID ?cpd_related_taxa_ID .
+	
+	# On récupère le composé associé
+	?cpd_related_taxa abroad:taxonProduces ?NP .
+	
+	# On récupère la référence bibliographique
+	?Nary_relation sio:SIO_000628 ?cpd_related_taxa, ?NP ;
+		sio:SIO_000253 ?ref .
+	
+	# On cherche si le composé est associé à une activité antibiotique
+	BIND( exists{ ?NP obo:RO_0000087 ?roleindividual .
+		?roleindividual rdf:type chebi:33281 . } AS ?y)
+}
+
+```
+
+
+# Get data
+```{r, results=FALSE, message=FALSE}
+all_taxons <- read_csv("data/taxon-ids-names.csv")
+data_taxons_cpd <- read_csv("data/taxon-np-list.csv")
+data_taxons_cpd$rank <- factor(data_taxons_cpd$rank, levels = c("reign", "order", "family", "subfamily", "genus", "subgenus", "species", "subspecies", "form", "variety"))
+
+mapping <- read_tsv("/home/mdelmas/Documents/ABRoad/data/VM/mutant_mapping.csv", col_types = cols("c", "c", "c", "c", "c"))
+```
+
+## Illustrative statistics
+
+### Distribution of the distinct number of associated natural products by taxa, organised per rank (Taxonomy according to Mycobank or GBIF)
+
+```{r, fig1, out.width="100%", fig.width = 8, fig.height = 6, message=FALSE}
+data_taxons_cpd %>% group_by(TAX_SOURCE, Accepted_ID) %>% summarise(nb_NP = n_distinct(pubchemId)) %>% left_join( (data_taxons_cpd %>% select(Accepted_ID, rank)), by = "Accepted_ID" ) %>% ggplot(aes(x = rank, y = nb_NP)) + 
+  geom_boxplot() +
+  geom_text(data = (data_taxons_cpd %>% select(TAX_SOURCE, rank, Accepted_ID, pubchemId) %>% distinct() %>% group_by(TAX_SOURCE, rank, .drop = FALSE) %>% summarise(n = paste0("Nb.taxa=", n_distinct(Accepted_ID), "\n", "tt.rel=", n()))), aes(x = rank, y = 1200, label=n), size = 1.5) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        text = element_text(size = 15)) +
+  scale_y_continuous(trans = "log10", breaks=c(0, 1, 10, 100, 1000, 10000, 100000), labels = c('0', '1', '10', '100', '1000', '10000', '100000')) + 
+  facet_grid(. ~ TAX_SOURCE) +
+  ggtitle("Distribution of the distinct number of associated natural products by taxa, organised per rank \n (Taxonomy according to Mycobank or GBIF)") +
+  ylab("Number of linked natural products per taxon") +
+  xlab("Taxa rank")
+```
+
+* La grande majorité (99% !) des liens taxon - np concernent des taxons de rang GENUS et SPECIES
+
+  * Est-ce que lorsque la specie exacteimpliqué dans la relation ne peut pas être identifiée, on associe à défault le GENUS, plus large ?
+  Effectivement même dans LOTUS parfois la relations est mise au niveau du GENUS (ex: Q105274056 avec Pestalotiopsis)
+
+* En termes de médianes (et mêne de moyenne), les GENUS disposent de plus de liens vers des np que les SPECIES.
+  * Je pense que ça vient encore du fait que si la SPECIE ne peut être correctement identifié, alors on renvoie au rang supérieur (Taxon) + le nomnre de taxa associés ä des genus est plus faible aue celui des species évidement
+
+* Tendance similaire entre les 2 taxonomies
+
+
+
+### Distribution of the distinct number of references per relations between a taxon and a natural product, organised per rank (Taxonomy according to Mycobank or GBIF)
+
+```{r, fig2, out.width="100%", fig.width = 8, fig.height = 6, message=FALSE}
+# there is only one rank per id per source, so its ok to also group by rank in order to keep the rank column
+dd <- data_taxons_cpd %>% mutate(rel_id = paste0(Accepted_ID, pubchemId)) %>% group_by(TAX_SOURCE, rank, rel_id) %>% summarise(nb_ref = n_distinct(ref))
+
+ggplot(dd, aes(x = rank, y = nb_ref)) + 
+geom_boxplot() +
+geom_text(data = (dd %>% group_by(TAX_SOURCE, rank, .drop = FALSE) %>% summarise(n = paste0("Nb.rel=",n()))), aes(x = rank, y = 30, label=n), size = 1.5) +
+theme_classic() +
+theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+    text = element_text(size = 15)) +
+facet_grid(. ~ TAX_SOURCE) +
+scale_y_continuous(breaks=seq(0, 25)) +
+ggtitle("Distribution of the distinct number of references per relations between a taxon and a natural product, organised per rank \n (Taxonomy according to Mycobank or GBIF)") +
+ylab("Number of linked natural products per taxon") +
+xlab("Taxa rank")
+
+```
+
+
+* En termes de distributions des références associées, pas de différences significatives apparaissent entre ressource taxonomique (GBIF ou MycoBank) et rangs taxonomiques
+
+
+# Glabal table summary
+
+### Number of taxons with available natural products by each taxonomic resources
+
+ * TOTAL_TAXONS: the number of accepted taxons (all ranks) by each taxonomic resource
+ * TOTAL_TAXONS_WITH_NP: the number of accepted taxons (all ranks) linked to at least one Natural Product (+ relative proportion)
+ * TOTAL_NUMBER_OF_LINKS: the number of distinct links taxon A produces Natural Product B, by taxonomic resource
+
+```{r, results=TRUE, message=FALSE}
+global_stats <- all_taxons %>% group_by(TAX_SOURCE) %>% summarise(TOTAL_TAXONS = n_distinct(Accepted_ID)) %>% 
+  left_join( (data_taxons_cpd %>% group_by(TAX_SOURCE) %>% summarise(TOTAL_TAXONS_WITH_NP = n_distinct(Accepted_ID))), by = "TAX_SOURCE") %>% 
+  mutate(TOTAL_TAXONS_WITH_NP = paste0(TOTAL_TAXONS_WITH_NP, " (", round((TOTAL_TAXONS_WITH_NP/TOTAL_TAXONS) * 100, 2), " %)") ) %>%
+  left_join( (data_taxons_cpd %>% mutate(LINK=paste0(Accepted_ID, pubchemId)) %>% group_by(TAX_SOURCE) %>% summarise(TOTAL_NUMBER_OF_LINKS = n_distinct(LINK))), by = "TAX_SOURCE") 
+
+DT::datatable(global_stats)
+```
+
+* L'essentiel des taxa n'est pas lié à un np.
+
+
+* * *
+
+**NOW, we focus only on species !**
+
+### Number of species with available natural products by each taxonomic resources
+
+ * TOTAL_TAXONS: the number of accepted taxons (rank=specie) by each taxonomic resource
+ * TOTAL_TAXONS_WITH_NP: the number of accepted taxons (rank=specie) linked to at least one Natural Product (+ relative proportion)
+ * TOTAL_NUMBER_OF_LINKS: the number of distinct links taxon A produces Natural Product B, by taxonomic resource
+ 
+
+```{r, results=FALSE, message=FALSE}
+all_taxons <- all_taxons %>% filter(rank == "species")
+data_taxons_cpd <- data_taxons_cpd %>% filter(rank == "species")
+```
+
+```{r, results=TRUE, message=FALSE}
+global_stats <- all_taxons %>% group_by(TAX_SOURCE) %>% summarise(TOTAL_TAXONS_SPECIES = n_distinct(Accepted_ID)) %>% 
+  left_join( (data_taxons_cpd %>% group_by(TAX_SOURCE) %>% summarise(TOTAL_TAXONS_SPECIES_WITH_NP = n_distinct(Accepted_ID))), by = "TAX_SOURCE") %>% 
+  mutate(TOTAL_TAXONS_SPECIES_WITH_NP = paste0(TOTAL_TAXONS_SPECIES_WITH_NP, " (", round((TOTAL_TAXONS_SPECIES_WITH_NP/TOTAL_TAXONS_SPECIES) * 100, 2), " %)") ) %>%
+  left_join( (data_taxons_cpd %>% mutate(LINK=paste0(Accepted_ID, pubchemId)) %>% group_by(TAX_SOURCE) %>% summarise(TOTAL_NUMBER_OF_LINKS = n_distinct(LINK))), by = "TAX_SOURCE") 
+
+DT::datatable(global_stats)
+```
+
+* L'essentiel des taxa species n'est pas lié à un np
+
+### Top 20 table mycobank
+```{r, results=TRUE, message=FALSE}
+data_taxons_cpd %>% filter(TAX_SOURCE == "mycobank-taxonomy") %>% group_by(Accepted_ID) %>% summarise(n.np = n_distinct(pubchemId)) %>% left_join((all_taxons %>% select(Accepted_ID, name)), by = "Accepted_ID") %>% arrange(desc(n.np)) %>% head(20) %>% DT::datatable()
+```
+
+### Top 20 table gbif
+```{r, results=TRUE, message=FALSE}
+data_taxons_cpd %>% filter(TAX_SOURCE == "gbif-taxonomy") %>% group_by(Accepted_ID) %>% summarise(n.np = n_distinct(pubchemId)) %>% left_join((all_taxons %>% select(Accepted_ID, name)), by = "Accepted_ID") %>% arrange(desc(n.np)) %>% head(20) %>% DT::datatable()
+```
+
+
+* Les tops sont en réalité similaires et les différences observés sont exclusivement ä des différences en termes de nomenclature (relations de synonymes) entre les species.
+
+Par exemple, alors que *Valsa sordida* est une espèce à part entière dans GBIF, elle est identifié comme un synonyme de *Cytospora chrysosperma* dans GBIF. Ainsi, leurs natural products sont associés à deux (*accepted*) species différentes
+
+
+Barplot of the number of links Natural products by Taxons
+```{r, fig3, out.width="70%", fig.width = 8, fig.height = 6, message=FALSE}
+# get the number of natural products by Accepted ID (and by taxonomic ref)
+data_histogram <- data_taxons_cpd %>% group_by(TAX_SOURCE, Accepted_ID) %>% summarise(nb_NP = n_distinct(pubchemId))
+
+# From the number extract the bin in which it belongs
+data_histogram$bin <- cut(data_histogram$nb_NP, breaks = c(0, 5, 10, 20, 50, 100, 1000, 10000), labels = c(']0-5]', "]5-10]", "]10-20]", "]20-50]", "]50-100]", "]100-1000]", "> 1000"), include.lowest = F, right = T)
+
+# Compute the number of accepted ID per bins
+data_histogram %>% group_by(TAX_SOURCE, bin) %>% summarise(count = n()) %>% ggplot(aes(x = bin, y = count)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label=count), vjust = -1) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+    text = element_text(size = 15)) +
+  facet_grid(. ~ TAX_SOURCE) + 
+  theme(text = element_text(size = 20), 
+        title = element_text(size = 15), 
+        axis.title.x = element_text(size = 20), 
+        axis.title.y = element_text(size = 20),
+        axis.text.x = element_text(size = 20),
+        axis.text.y = element_text(size = 20)) +
+  ggtitle("Distribution of the distinct number of associated natural products by fungal species \n (Taxonomy according to Mycobank or GBIF)") +
+  xlab("Number of linked natural products") +
+  ylab("Number of taxon species")
+
+```
+
+
+* Parmis les taxa disposant de littérature, on observe une distribution *skewed* (déséquilibrée)
+  * la majorité de taxa avec peut de liens vers des np. 
+
+* Observations similaires sur les 2 taxonomies
+
+
+Barplot of the number of associated taxa per Natural Products
+```{r, fig4, out.width="70%", fig.width = 8, fig.height = 6, message=FALSE}
+# get the number of natural products by Accepted ID (and by taxonomic ref)
+data_histogram_2 <- data_taxons_cpd %>% group_by(TAX_SOURCE, pubchemId) %>% summarise(nb_TAXA = n_distinct(Accepted_ID))
+
+# From the number extract the bin in which it belongs
+data_histogram_2$bin <- cut(data_histogram_2$nb_TAXA, breaks = c(0, 5, 10, 20, 50, 100, 1000, 10000), labels = c(']0-5]', "]5-10]", "]10-20]", "]20-50]", "]50-100]", "]100-1000]", "> 1000"), include.lowest = F, right = T)
+
+# Compute the number of accepted ID per bins
+data_histogram_2 %>% group_by(TAX_SOURCE, bin) %>% summarise(count = n()) %>% ggplot(aes(x = bin, y = count)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label=count), vjust = -1) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+    text = element_text(size = 15)) +
+  facet_grid(. ~ TAX_SOURCE) + 
+  theme(text = element_text(size = 20), 
+        title = element_text(size = 15), 
+        axis.title.x = element_text(size = 20), 
+        axis.title.y = element_text(size = 20),
+        axis.text.x = element_text(size = 20),
+        axis.text.y = element_text(size = 20)) +
+  ggtitle("Distribution of the distinct number of associated natural products by fungal species \n (Taxonomy according to Mycobank or GBIF)") +
+  xlab("Number of linked taxa") +
+  ylab("Number of natural products")
+
+```
+
+-> on a pas beaucoup d'imbalance côté Chemical !!! On peut dire que ~ 99 % sont présent moins de 5 fois !!
+
+#### Pareto plots
+
+```{r}
+
+data_pareto <- data_taxons_cpd %>% group_by(TAX_SOURCE, Accepted_ID) %>% summarise(nb_NP = n_distinct(pubchemId)) %>% arrange(desc(nb_NP)) %>% group_by(TAX_SOURCE) %>% mutate(index = 1:n(), prop = cumsum(nb_NP) /sum(nb_NP) * 100) %>% mutate(cumulative_index_prop = index / max(index) * 100)
+
+ggplot(data_pareto, aes(x = cumulative_index_prop, y = prop)) + geom_line() + theme_classic() + facet_grid(. ~ TAX_SOURCE)
+
+```
+
+* le top 27% des taxa aggrège 80% des relations. 
+
+#### Barplot of the number of references per link between taxa and natural products
+
+```{r, fig5, out.width="70%", fig.width = 8, fig.height = 6, message=FALSE}
+# get the number of references by relations between a taxon and a natural product (and by taxonomic ref)
+data_histogram_2 <- data_taxons_cpd %>% mutate(rel_id = paste0(Accepted_ID, pubchemId)) %>% group_by(TAX_SOURCE, rel_id) %>% summarise(nb_ref = n_distinct(ref))
+
+# From the number of refs, extract the bin in which it belongs
+data_histogram_2$bin <- cut(data_histogram_2$nb_ref, breaks = c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 100), labels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "> 10"), include.lowest = F, right = T)
+
+# Compute the number of accepted ID per bins
+data_histogram_2 %>% group_by(TAX_SOURCE, bin) %>% summarise(count = n()) %>% ggplot(aes(x = bin, y = count)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label=count), vjust = -1) +
+  theme_classic() +
+  facet_grid(. ~ TAX_SOURCE) + 
+  theme(text = element_text(size = 20), 
+        title = element_text(size = 20), 
+        axis.title.x = element_text(size = 20), 
+        axis.title.y = element_text(size = 20),
+        axis.text.x = element_text(size = 20),
+        axis.text.y = element_text(size = 20)) +
+  ggtitle("Distribution of the distinct number of references per relations between a taxon and a natural products \n (Taxonomy according to Mycobank or GBIF)") +
+  xlab("Number of bibliographic references") +
+  ylab("Number of taxon - natural product relations")
+
+```
+
+* Beaucoup des relations ne sont sountenus que par une seule référence
+
+
+#### Distribution du nombre de relations dans lesquelles sont impliquées les références bibliographique
+
+```{r}
+data_ref_distrib <- data_taxons_cpd %>% mutate(rel_id = paste0(Accepted_ID, pubchemId)) %>% select(TAX_SOURCE, rel_id, ref) %>% group_by(TAX_SOURCE, ref) %>% summarise(n = n())
+
+data_ref_distrib$bin <- cut(data_ref_distrib$n, breaks = c(0, 5, 10, 20, 50, 100, 1000, 10000), labels = c(']0-5]', "]5-10]", "]10-20]", "]20-50]", "]50-100]", "]100-1000]", "> 1000"), include.lowest = F, right = T)
+
+data_ref_distrib %>% group_by(TAX_SOURCE, bin) %>% summarise(count = n()) %>% ggplot(aes(x = bin, y = count)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label=count), vjust = -1) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+    text = element_text(size = 15)) +
+  facet_grid(. ~ TAX_SOURCE) + 
+  theme(text = element_text(size = 20), 
+        title = element_text(size = 15), 
+        axis.title.x = element_text(size = 20), 
+        axis.title.y = element_text(size = 20),
+        axis.text.x = element_text(size = 20),
+        axis.text.y = element_text(size = 20)) +
+  ggtitle("Distribution of the distinct relations (taxon - n.p) that a bibliographic reference supports \n (Taxonomy according to Mycobank or GBIF)") +
+  xlab("Number of relations (taxon - n.p)") +
+  ylab("Number of references")
+
+
+```
+* Majoritairement une publication set associé à uniquement 1 relation. Mais certaines semblent, de manière assez suspecte, soutenir plusieurs relations.
+
+
+##### Table du top 10 des références participant à soutenir le plus de relations
+
+```{r}
+data_ref_distrib %>% ungroup() %>% select(ref, n) %>% distinct() %>% arrange(desc(n)) %>% head(10) %>% DT::datatable()
+```
+
+
+Pour le top 10, on voit que ceraines publication semblent soutenir de mombreuses relations. Or dans le détails, plusieurs d'entre elles semblent érronées.
+Par exemple, la plublication https://www.doi.org/10.1128/SPECTRUM.00176-22 est censé supporter une relation entre Adenylosuccinate et *Valsa sordida*, mais aucune justification sur ce statement ne peut être trouvé dans cette article.
+
+Il semble également important de noter que toutes les relations que nous avons extraites ne sont pas fournis par LOTUS. En effet, par exemple pour ce composé (Adenylosuccinate) seulement un lien vers  *Apis cerana* est référencé sur LOTUS ...
+
+Alors d'où viennent ces relations ? -> Envoyer un mail !
+
+### Number of natural products with known antiobtic
+
+```{r, results=TRUE, message=FALSE}
+
+a <- data_taxons_cpd %>% select(pubchemId, y) %>% distinct()
+DT::datatable(data.frame(TOTAL_NB_NP = nrow(a), NP_WITH_AM = sum(a$y)))
+
+```
+
+
+
+
+# Avec les data de VM:
+```{r, results=FALSE, message=FALSE}
+# On recharge les data avec Genus, family etc,
+data_taxons_cpd <- read_csv("data/taxon-np-list.csv")
+data_taxons_cpd$rank <- factor(data_taxons_cpd$rank, levels = c("reign", "order", "family", "subfamily", "genus", "subgenus", "species", "subspecies", "form", "variety"))
+data_taxons_cpd$Accepted_ID <- as.character(data_taxons_cpd$Accepted_ID)
+# On aligne les data sur le mapping par identifant et ressource taxonomique
+
+data_mapping <- mapping %>% pivot_longer(c("gbifspecie", "mycobank"), names_to = "taxonomy", values_to = "id") %>% transform(id = strsplit(as.character(id),",")) %>% unnest(id)
+
+# On aligne les noms de taxonomy (mycobank et GBIF) pour au'ils correspondent lors du mapping
+data_mapping[data_mapping$taxonomy == "gbifspecie", ]$taxonomy  <- "gbif-taxonomy"
+data_mapping[data_mapping$taxonomy == "mycobank", ]$taxonomy  <- "mycobank-taxonomy"
+
+data_mapping <- data_mapping %>% left_join(data_taxons_cpd, by = c("id" = "Accepted_ID", "taxonomy" = "TAX_SOURCE"))
+```
+
+
+```{r, results=FALSE, message=FALSE}
+data_mapping <- data_mapping %>% group_by(taxonomy, identificationID, .drop = FALSE) %>% summarise(nb.NP = n_distinct(pubchemId[! is.na(pubchemId)]), nb.antibio = n_distinct(pubchemId[y == 1]))
+```
+## Tables by resources
+
+### GBIF
+```{r, results=TRUE, message=FALSE}
+data_mapping %>% filter(taxonomy == "gbif-taxonomy") %>% DT::datatable()
+```
+
+### Mycobank
+
+```{r, results=TRUE, message=FALSE}
+data_mapping %>% filter(taxonomy == "mycobank-taxonomy") %>% DT::datatable()
+```
+
+Barplot of the number of links Natural products by Taxons
+```{r, fig6, out.width="70%", fig.width = 8, fig.height = 6, message=FALSE}
+
+# From the number extract the bin in which it belongs
+data_mapping$bin <- cut(data_mapping$nb.NP, breaks = c(-1, 0, 5, 10, 20, 50, 100, 1000, 10000), labels = c("[0]", "]0-5]", "]5-10]", "]10-20]", "]20-50]", "]50-100]", "]100-1000]", "> 1000"), include.lowest = F, right = T)
+
+# Compute the number of accepted ID per bins
+data_mapping %>% group_by(taxonomy, bin) %>% summarise(count = n()) %>% ggplot(aes(x = bin, y = count)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label=count), vjust = -1) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+    text = element_text(size = 15)) +
+  facet_grid(. ~ taxonomy) + 
+  theme(text = element_text(size = 20), 
+        title = element_text(size = 20), 
+        axis.title.x = element_text(size = 20), 
+        axis.title.y = element_text(size = 20),
+        axis.text.x = element_text(size = 20),
+        axis.text.y = element_text(size = 20)) +
+  ggtitle("Distribution of the distinct number of associated natural products by fungal species in the dataset \n (Taxonomy according to Mycobank or GBIF)") +
+  xlab("Number of linked natural products") +
+  ylab("Number of taxon species")
+
+```
+
+Pour l'essentiel des taxons du dataset (tous rangs compris), on ne dispose pas de liens vers des np.

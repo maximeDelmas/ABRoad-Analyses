@@ -1,0 +1,470 @@
+---
+title: "Evaluate predictions - Opti"
+author: "Maxime Delmas"
+date: "2023-02-10"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(rjson)
+library(PTXQC)
+library(DT)
+library(stringr)
+```
+
+
+```{r}
+
+# read and inport json data
+read_predictions <- function(path){
+  json.str <- readLines(path, ok = T, warn = F)
+  json.data <- fromJSON(json.str[1])
+  return(json.data)
+}
+
+# From the json data, creates the data.frame, with columns: subject.id, preds.label, preds.probas, rank
+extract_prediction_proba_pairs <- function(json.data){
+  
+  # Get length
+  N <- length(json.data[["result"]])
+  M <- length(json.data[["result"]][[1]][["preds"]])
+  
+  # inti the dataset
+  dataset <- data.frame(subject.id = vector("character", N * M), preds.label = vector("character", N * M), preds.probas = vector("numeric", N * M), preds.rank = rep(c(1:M), N))
+  
+  for(i in 1:N) {
+    
+    # get the data and fill to the corresponding indexes.
+    result <- json.data[["result"]][[i]]
+    
+    splited.uuid <- strsplit(result[["uuid"]], "-")[[1]]
+    subject.id <- splited.uuid[1]
+    
+    # preds
+    preds <- unlist(result[["preds"]])
+    preds.label <- preds[seq(1, length(preds), 2)]
+    preds.probas <- preds[seq(2, length(preds), 2)]
+    
+    
+    is.correct <- rep(FALSE, M)
+    if(length(result[["corrected_preds"]]) > 0) {
+      # correct preds
+      correct.preds <- unlist(result[["corrected_preds"]])
+      correct.preds.label <- correct.preds[seq(1, length(correct.preds), 2)]
+      correct.preds.rank <- as.numeric(correct.preds[seq(2, length(correct.preds), 2)])
+      
+      # test if preds in correct preds
+      is.correct <- preds.label %in% correct.preds.label
+    }
+    
+    dataset[(M*(i - 1) + 1):(M * i ), "subject.id"] <- subject.id
+    dataset[(M*(i - 1) + 1):(M * i ), "preds.label"] <- preds.label
+    dataset[(M*(i - 1) + 1):(M * i ), "preds.probas"] <- as.numeric(preds.probas)
+    dataset[(M*(i - 1) + 1):(M * i ), "is.correct"] <- is.correct
+    
+  }
+  return(dataset)
+}
+
+
+create_histogram <- function(big.df){
+  data_for_plot <- big.df %>% filter(rank.in.masked > 0) %>% select(ref, preds.rank, rank.in.masked) %>% rename("exp" = "preds.rank", "mask" = "rank.in.masked") %>% pivot_longer(c("exp", "mask"), names_to="rank.in", values_to="rank")
+  data_for_plot$rank <- factor(data_for_plot$rank, levels = 1:50)
+  data_for_plot <- data_for_plot %>% group_by(ref, rank.in, rank, .drop=F) %>% summarise(n = n())
+  data_for_plot <- data_for_plot %>% group_by(ref, rank.in) %>% mutate(freq = (n/sum(n)) * 100)
+  
+  p <- data_for_plot %>% ggplot(aes(x = rank, y = freq, fill = rank.in)) +
+    geom_bar(stat="identity", color="black", position=position_dodge()) +
+    theme_classic() +
+    facet_wrap(. ~ ref) +
+    theme(axis.text = element_text(size = 10), axis.text.x = element_text(hjust = 1)) +
+    ylim(c(0,100))
+  
+  return(p)
+}
+
+create_plot2 <- function(big.df){
+  for(ref in unique(big.df$ref)){
+      sub.df <- big.df[big.df$ref == ref, ]
+      data_for_plot <- sub.df %>% mutate(masked.rank.bin = cut(rank.in.masked, breaks = c(-1, 1, 2, 5, 10, 20, 50), labels = c('exclusive', "top1", "top [2-5[", "top [5-10[", "[10-20[", "[20-50["), include.lowest = T, right = F))
+      data_for_plot <- data_for_plot %>% group_by(ref, preds.rank, masked.rank.bin) %>% summarise(n = n())
+      data_for_plot <- data_for_plot %>% group_by(ref, preds.rank) %>% mutate(prop = (n/sum(n)) * 100)
+      data_for_plot$masked.rank.bin <- factor(data_for_plot$masked.rank.bin, levels = c('exclusive', "top1", "top [2-5[", "top [5-10[", "[10-20[", "[20-50["))
+      
+      p <- data_for_plot %>% ggplot(aes(x = preds.rank, y = prop, fill = masked.rank.bin)) +
+        geom_bar(stat="identity") +
+        theme_classic() +
+        scale_fill_discrete(drop=FALSE) +
+        theme(axis.text = element_text(size = 20), text = element_text(size = 15)) +
+        ggtitle(paste("property= ", ref))
+      plot(p)
+  }
+}
+
+# x a single str
+# y a list of str to compare.
+# find the longest common prefix between x and the list of string y.
+
+longest_common_prefix <- function(x, y) {
+    # Remove punctation or digit characters (if chemical for instance):
+    process_str <- function(x) {
+      tolower(gsub('[[:punct:][:digit:]]+','',x))
+    }
+    x.processed <- process_str(x)
+    y.processed <- sapply(y, FUN = process_str, simplify = T, USE.NAMES = F)
+    
+    longest <- 0
+    # cut x by space
+    for (ind.x in strsplit(x.processed, " ")[[1]]) {
+      
+      # also test on all y cuted by space
+      for(ind.y in unlist(sapply(y.processed, FUN = function(x){strsplit(x, " ")}, simplify = T, USE.NAMES = F)) ){
+        
+        # test if longest prefix is
+        l <- nchar(longestCommonPrefix(c(ind.x, ind.y)))
+        
+        if(l > longest){
+          longest <- l
+        }
+      }
+    }
+    return(longest)
+}
+
+read_test_data <- function(path){
+  
+  lines <- readLines(path, ok = T, warn = F)
+  
+  N <- length(lines)
+  
+  out <- data.frame("subject.id" = vector("character", N), "subject.label" = vector("character", N), "object.labels" = vector("character", N), LCP = vector("numeric", N))
+
+  for(index in 1:N){
+    
+    line <- lines[index]
+    
+    json.data <- fromJSON(line)
+    
+    subject.id <- json.data[["sub_uri"]]
+    
+    # On ne considère pas les synonymes car ils ne sont pas envoyé au modèle.
+    subject.label <- json.data[["sub_label"]]
+    
+    object.labels <- c(json.data[["obj_label"]], unlist(json.data[["obj_aliases"]]))
+    
+    LCP <- longest_common_prefix(x = subject.label, object.labels)
+    
+    out[index, "subject.id"] <- subject.id
+    out[index, "subject.label"] <- subject.label
+    out[index, "object.labels"] <- paste(object.labels, collapse="; ")
+    out[index, "LCP"] <- LCP
+  }
+  return(out)
+}
+
+frequency_of_object_in_test_data <- function(path){
+  
+  name_normalise <- function(name){
+    
+    # lower
+    name <- tolower(name)
+    
+    # remove punctuation and space
+    name <- gsub("[[:punct:]]", "", name)
+    
+    # remove articles
+    name <- gsub("\\b(a|an|the)\\b", "", name, perl = T)
+    
+    # fix white spaces
+    name_ <- str_split(name, "\\s+", simplify = T)
+    name <- paste(name_[name_ != ""], collapse = " ")
+    return(name)
+  }
+  
+  lines <- readLines(path, ok = T, warn = F)
+  
+  N <- length(lines)
+  
+  # dict to map names of predictions to ids
+  names_to_id <- list()
+  id_to_count <-  list()
+  
+  for(index in 1:N){
+    
+    line <- lines[index]
+    
+    json.data <- fromJSON(line)
+    
+    objects.uris <- json.data[["obj_uris"]]
+    for(i in 1:length(objects.uris)){
+        
+      uri <- objects.uris[i]
+        
+      # first time we meet this id ?
+        if (! uri %in% names_to_id) {
+            
+            for (name  in c(json.data[["obj_labels"]][i], unlist(json.data[["obj_aliases"]][i]) )) {
+              names_to_id[[name_normalise(name)]] <- uri
+            }
+            id_to_count[[uri]] <- 1
+        }
+
+        # not the first time, increment count
+        else{
+            id_to_count[[uri]] <- id_to_count[[uri]] + 1
+        }
+    }
+  }
+  return(list(names_to_id, id_to_count))
+  
+}
+
+
+bias_from_training_dataset <- function(path_to_train, l_train, bif.df, ref, top=10){
+  
+  prediction_data <- bif.df[bif.df$ref == ref, ]
+  prop_stats <- frequency_of_object_in_test_data(path_to_train)
+  prop_name_to_id <- prop_stats[[1]]
+  prop_id_to_count <- prop_stats[[2]]
+  df_prop_id_to_count <- data.frame(object.id = names(prop_id_to_count), count_in_train = as.integer(prop_id_to_count))
+  # On fait le top par rapport aux rank et noms directement aux object.ids, comme ça, si jamis plusieurs objets ont la fréquence atteinte au top choisi, alors tous sont gardés.
+  temp_df <- data_frame(count_in_train = unique(df_prop_id_to_count$count_in_train))
+  temp_df <- temp_df[order(temp_df$count_in_train, decreasing = T), ]
+  temp_df$index <- 1:nrow(temp_df)
+  temp_df$isintop <- temp_df$index <= top
+
+  df_prop_id_to_count <- df_prop_id_to_count %>% left_join((temp_df %>% select(count_in_train, isintop)), by = "count_in_train")
+  
+  df_prop_name_to_id <- data.frame(preds.label = names(prop_name_to_id),  object.id = as.character(prop_name_to_id))
+ 
+  prediction_data <- prediction_data %>% left_join(df_prop_name_to_id, by = "preds.label") %>% left_join(df_prop_id_to_count, by = "object.id")
+  prediction_data[is.na(prediction_data$isintop), ]$isintop <- FALSE
+  
+  data_for_plot <- prediction_data %>% group_by(preds.rank, isintop) %>% summarise(n = n())
+  data_for_plot <- data_for_plot %>% group_by(preds.rank) %>% mutate(prop = (n/sum(n)) * 100)
+  
+  p <- data_for_plot %>% ggplot(aes(x = preds.rank, y = prop, fill = isintop)) +
+  geom_bar(stat="identity") +
+  theme_classic() +
+  scale_fill_discrete(drop=FALSE) +
+  theme(axis.text = element_text(size = 20), text = element_text(size = 15)) +
+  ggtitle(paste("property= ", ref))
+  plot(p)
+}
+
+
+```
+
+# DATA
+Attention, respecter la nomenclature: prop-model_name
+```{r}
+
+model_ref <- c("P703-PubMedBERT-full*", "rP703-PubMedBERT-full*")
+
+model_res <- c("output/np/opti/PubMedBERT-full/manual1/order/none/P703.json",
+               "output/np/opti/PubMedBERT-full/FS/order/confidence/rP703.json")
+
+model_res_masked <- c("output/np/opti/PubMedBERT-full/manual1/order/none/MASKED/P703.json",
+                      "output/np/opti/PubMedBERT-full/FS/order/confidence/MASKED/rP703.json")
+
+test_data <- c("data/np/triples_processed/P703/test.jsonl", "data/np/triples_processed/rP703/test.jsonl")
+
+```
+
+
+On loop sur tous les fichiers pour remplir la table.
+```{r}
+
+list.of.df <- list()
+
+for(index in 1:2){
+  
+  print("<=====================")
+  print(model_ref[index])
+  p1 <- model_res[index]
+  p2 <- model_res_masked[index]
+  
+  print(paste("- Std. file at: ", p1))
+  print(paste("- Masked. file at: ", p2))
+  
+  std <- extract_prediction_proba_pairs(read_predictions(p1)) %>% distinct()
+  masked <- extract_prediction_proba_pairs(read_predictions(p2)) %>% distinct()
+  
+  masked_for_merging <- (masked %>% select(preds.label, preds.rank))
+  colnames(masked_for_merging) <- c("preds.label", "rank.in.masked")
+  
+  comp <- std %>% left_join(masked_for_merging, by = "preds.label")
+  comp[is.na(comp$rank.in.masked), ]$rank.in.masked <- -1
+  
+  # comp <- compare_std_exp_to_masked(std, masked)
+  
+  # fill with metadata
+  comp$ref <- model_ref[index]
+  
+  list.of.df[[index]] <- comp
+  
+  print("=====================>")
+  
+  index <- index + 1
+}
+          
+big.df <- do.call("rbind", list.of.df)
+
+# remove null predictions (== "") or prediction that are just a number.
+big.df <- big.df[ (big.df$preds.label != "") , ]
+```
+
+# Evalutation on **all** preds
+
+Nombre de sujets pour lesquels au moins une des prédictions est communes avec les prédictions faites lorsque le sujet est maské.
+```{r}
+precent.subjects.in.mask.all.preds <- big.df %>% group_by(ref) %>% summarise(n.subjects = n_distinct(subject.id)) %>% left_join((big.df %>% filter(rank.in.masked > 0) %>% group_by(ref) %>% summarise(n.subjects.in.mask = n_distinct(subject.id))), by = "ref")
+
+precent.subjects.in.mask.all.preds <- precent.subjects.in.mask.all.preds %>% mutate(percent = (n.subjects.in.mask/n.subjects) * 100)
+DT::datatable(precent.subjects.in.mask.all.preds)
+```
+
+Pour estimer si un modèle, sur une relation spécifique (P703 ou rP703), est probablement soumis au prompt-bias, on cherche à estiner la proportion de sujet testés pour lesquels au moins un des objets prédits par le modèle (dans le top 50 des prédictions), auraient pu être prédit par ce modèle si le sujet avait été maské. 
+
+
+```{r}
+big.df %>% filter(rank.in.masked > 0) %>% group_by(ref) %>% summarise(N = n())
+```
+
+
+- Pour estimer le prompt-bias, on ne peut pas utiliser simplement tester la corrélation, car on n'est plus sur du single-tokens. Ici, nos prédictions sont multi-tokens et donc on ne peut pas simplement utiliser le vocabulaire comme étant la liste de toutes les prédictions possibles et comparer la corréalations des probabilités de chacunes.
+
+Pour mesurer le prompt bias, on s'interresse alors à la distribution des rangs, pour les prédictions communes entre les deux configuraion: sujet présent ou maské.
+
+```{r, out.width="100%", fig.width = 8, fig.height = 6, message=FALSE}
+# plot(create_histogram(big.df))
+create_plot2(big.df)
+```
+
+Correlation de SPEARMAN (sur les rangs donc) pour les prédictions communes.
+```{r}
+big.df %>% filter(rank.in.masked > 0) %>% group_by(ref) %>% summarise(SPEARMAN = cor(preds.rank, rank.in.masked))
+
+# big.df %>% filter(preds.rank <= 5) %>% group_by(ref) %>% summarise(sum(rank.in.masked > 0) / n())
+```
+
+## Impact du training dataset
+
+Pour mesurer l'influence du training set et à quel point notre modèle aurait pu over-fitté avec l'approche opti-prompt, on cherche à déterminer si les objets  prédits par notre modèle font partis du top10 des objets fréquement retrouvés dans notre training dataset.
+
+On mesure cela également par rapport aux rangs des objets prdéits.
+
+Globalement on peut constater que les objets fréquent dans notre training set ont également tendance à être fréquement prédit par notre modèle.
+
+```{r, out.width="100%", fig.width = 8, fig.height = 6, message=FALSE}
+
+bias_from_training_dataset("data/np/triples_processed/P703/train.jsonl", 1546, big.df, "P703-PubMedBERT-full*")
+
+bias_from_training_dataset("data/np/triples_processed/rP703/train.jsonl", 400, big.df, "rP703-PubMedBERT-full*")
+
+```
+
+
+
+# Evalutation on **correct** preds
+
+Quel est la distribution des rangs des prédictions correctes parmis les autres prédictions ?
+```{r}
+big.df %>% filter(is.correct) %>% group_by(ref) %>% summarise(median.rank = median(preds.rank),
+                                                              min.rank = min(preds.rank),
+                                                              max.rank = max(preds.rank)) %>% DT::datatable()
+
+data_for_plot <- big.df
+data_for_plot$preds.rank <- factor(data_for_plot$preds.rank, levels = 1:50)
+data_for_plot %>% filter(is.correct) %>% group_by(ref, preds.rank, .drop=F) %>% summarise(n = n()) %>% mutate(prop = (n / sum(n)) * 100 ) %>% 
+  ggplot(aes(x = preds.rank, y = prop)) +
+  geom_bar(stat="identity") +
+  theme_classic() +
+  facet_grid(. ~ ref) +
+  theme(axis.text = element_text(size = 10), text = element_text(size = 15))
+```
+
+**Pour le prompt bias:** 
+ - on a déjà pu le montrer sur les prdiction globale, les prédictions correctes n'étant qu'un sous-set.
+ - De toutes manière, même si on chercher à le montrer, dans le cas de la prop. P703 elles sont dans le top, et il n'y a pas de prédiction communes pour la prop. rP703
+
+```{r}
+big.df %>% group_by(ref) %>% filter(is.correct, rank.in.masked > 0, .preserve=T) %>% summarise(n = n())
+```
+
+Est-ce qu'il s'agit de rèponses fréaquentes (non-spécifique) du modèle ?
+
+Ici, pour les prédictions d'objets correctes, on cherche à savoir si celles-ci sont des réponses très fréquentes du modèle ou au contraire, spécifique.  
+```{r}
+
+preds_frequency <- big.df %>% group_by(ref, preds.label) %>% summarise(n = n_distinct(subject.id))
+preds_frequency <- preds_frequency %>% left_join((big.df %>% group_by(ref) %>% summarise(N = n_distinct(subject.id))), by = "ref")
+preds_frequency$freq <- (preds_frequency$n / preds_frequency$N) * 100
+
+
+correcte_preds_and_freq <- big.df %>% filter(is.correct) %>% left_join((preds_frequency %>% select(-c(n, N))), by = c("ref", "preds.label"))
+
+correcte_preds_and_freq %>% group_by(ref) %>% summarise(median = median(freq),
+                                                        min = min(freq),
+                                                        max = max(freq))
+```
+
+Globalement les prédictions correctes impliquent des objets qui sont effectivement relativement fréquement prédit par le modèle. Avec quelques outliers, comme aspergillus niger qui sont prédits dans plis de 68\% des expériences par exemple.
+
+
+## Name leakage
+
+Le valeur du LCP représente pour un sujet, la taille maximale du préfix commun le plus long, en considérant **tous** les objets qui peuvent être associés à ce sujet avec la propriété choisie (P703 ou rP703). Ainsi, le LCP est une valeur maximale, une borne supérieure, et est unique pour un couple sujet-propriété donné .
+
+Un fort LCP désigne donc un sujet pour lesquels au moins un des objets associés par la propriété choisie à un long préfixe commun et serait donc facilement prédictible par le modèle dans le cas de leakage.    
+
+Un exemple ambigue qui peut se présenter, est une prédiction pour laquelle le sujet est annoté avec un LCP fort, mais pour autant, l’objet prédit par le modèle ne présente pas de préfixe commun. Ainsi, le modèle n'a pas prédit l'objet (la réponse) pour lequel pourtant il semble exister un fort leakage.
+
+```{r}
+# limite de la taille du prefixed commun
+LCP_limit <- 6
+test_data_P703 <- read_test_data(test_data[1])
+test_data_P703$prop <- "P703"
+
+test_data_rP703 <- read_test_data(test_data[2])
+test_data_rP703$prop <- "rP703"
+
+LCP_for_join <- rbind((test_data_P703 %>% select(subject.id, prop, LCP)), (test_data_rP703 %>% select(subject.id, prop, LCP)))
+
+big.df %>% mutate(prop = str_split(ref, "-", simplify = T)[, 1]) %>% 
+  left_join(LCP_for_join, by = c("prop", "subject.id")) %>% 
+  mutate(ObjectLeaked = LCP >= LCP_limit) %>% 
+  group_by(ref, ObjectLeaked) %>% summarise("Acc@5" = signif((n_distinct(subject.id[is.correct==T & preds.rank <= 5]) / n_distinct(subject.id)) * 100, 2)) %>%
+  DT::datatable()
+```
+
+
+On voit effectivement que le modèle prédit mieux dans le cas de leakage de l'objet depuis le sujet.
+
+Pour cette table, on va cette fois déterminer le LCP (longest common prefix) non pas maximal en considérant tous les objets associés par la propriété, mais, spécifique à l'objet prédit par le modèle. Cela va nous permettre d'identifier les cas où il y a réellement eu leakage.
+
+```{r}
+correct_preds_freq_and_LCP <- correcte_preds_and_freq %>% mutate(prop = str_split(ref, "-", simplify = T)[, 1])
+
+correct_preds_freq_and_LCP <- correct_preds_freq_and_LCP %>% left_join((rbind(test_data_P703, test_data_rP703) %>% select(subject.id, prop, subject.label)), by = c("subject.id", "prop"))
+
+correct_preds_freq_and_LCP$lcp <- apply(correct_preds_freq_and_LCP, FUN = function(x){longest_common_prefix(x["subject.label"], x["preds.label"])}, 1)
+
+correct_preds_freq_and_LCP$rank.in.masked <- as.integer(correct_preds_freq_and_LCP$rank.in.masked)
+correct_preds_freq_and_LCP$preds.rank <- as.integer(correct_preds_freq_and_LCP$preds.rank)
+correct_preds_freq_and_LCP$lcp <- as.integer(correct_preds_freq_and_LCP$lcp)
+correct_preds_freq_and_LCP$freq <- round(correct_preds_freq_and_LCP$freq, 2)
+# Liste des filtres:
+  # - LCP == 0
+  # - freq <= 10
+  # - rank.in.mask == -1
+  # - 
+correct_preds_freq_and_LCP %>% DT::datatable(filter = "top") 
+```
+
+
+
+

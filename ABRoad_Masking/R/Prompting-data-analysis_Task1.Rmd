@@ -1,0 +1,205 @@
+---
+title: "Prompting"
+author: "Maxime Delmas"
+date: "2023-01-27"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(DT)
+```
+
+
+# Task 1: Fungus [X] produces chemical [X]
+
+List of templates:
+- Compound {compound} was {mask} from fungus {fungi} with the antimicrobial guided isolation procedure.
+- {compound} was {mask} from {fungi} with the antimicrobial guided isolation procedure.
+- Compound {compound} was {mask} obtained from fungus {fungi} with the antimicrobial guided isolation procedure.
+- {compound} was {mask} obtained from {fungi} with the antimicrobial guided isolation procedure.',      
+- Fungus {fungi} showed {mask} {compound} activity.
+- {fungi} showed {mask} {compound} activity.
+- Fungus {fungi} {mask} {compound} activity.
+- {fungi} {mask} {compound} activity.
+- Fungus {fungi} {mask} compound {compound}.
+- Authors {mask} a natural product called {compound} from the {fungi}.
+- A strain {fungi} was isolated as a {mask} {compound} producer.',              
+- A strain {fungi} was {mask} as a high {compound} producer.
+- Compound {compound} is produced by fungus {fungi}. It is {mask}.
+
+
+
+## Load results
+```{r}
+data_JS_divergences <- read_tsv("data/JS_divergence_table_complete_task1_5000.tsv")
+
+longer_data_JS_divergences <- data_JS_divergences %>% pivot_longer(cols = c("PosxPos", "NegxNeg", "PosxNeg"), names_to = "Type", values_to = "JSD")
+
+# remove lines with na in cases of compution errors (i can happen on some lines ...)
+longer_data_JS_divergences <- longer_data_JS_divergences[! is.na(longer_data_JS_divergences$JSD), ]
+
+# laod top 20
+top_20 <- read_tsv("data/top_k_table_task1.tsv")
+top_20$Template <- as.factor(top_20$Template)
+top_20$model <- as.factor(top_20$model)
+top_20$Type <- as.factor(top_20$Type)
+
+
+
+top1_cor <- read_tsv("data/top_1_cor_task1.tsv")
+# top1_cor <- top1_cor %>% pivot_wider(names_from = Template, values_from = cors)
+```
+
+## 1 - Compare distribution of JS-duvergences with Kruskal-Wallis chi-squared
+```{r}
+# See: The need to report effect size estimates revisited. An overview of some recommended measures of effect size
+
+# The interpretation values commonly in published literature are: 0.01- < 0.06 (small effect), 0.06 - < 0.14 (moderate effect) and >= 0.14 (large effect).
+
+# -> The KS stats may very a bit from different sampling, but if we look at the boxplot betwwen different samples, mediam, mean, min, etc... are globally thr sane, so its justs the ranks that can be a bit differents, but whatever the conclusions are the same.
+
+# prepare data
+KW_data <- longer_data_JS_divergences %>% select(model, Template) %>% distinct()
+KW_data$KW_stats <- 0
+KW_data$p.value <- 0
+KW_data$effect.size <- 0
+
+k <- length(unique(longer_data_JS_divergences$Type))
+
+for (i in 1:nrow(KW_data)) {
+  model <- KW_data[i, ]$model
+  template <- KW_data[i, ]$Template
+  data_kw <- longer_data_JS_divergences[longer_data_JS_divergences$model == model & longer_data_JS_divergences$Template == template, ]
+  n <- nrow(data_kw)
+  kw <- kruskal.test(JSD ~ Type, data = data_kw)
+  KW_data[i, ]$KW_stats <- as.numeric(kw$statistic)
+  KW_data[i, ]$p.value <- as.numeric(kw$p.value)
+  KW_data[i, ]$effect.size <- (as.numeric(kw$statistic) - k + 1) / (n - k) * 100
+}
+
+DT::datatable(KW_data)
+```
+
+While most of the comparison are signficant due to sample size, we can clearly see that the effect size indicate a small amount of variance explained by the Type of the comparison: PosxPos, NegxNeg or PosxNeg.
+
+La taille d'effet maximale observé est autour de 3%, ce qui est très faible.
+
+# Produce graph by template
+```{r, fig1, out.width="100%", fig.width = 8, fig.height = 6, message=FALSE}
+for(template in unique(longer_data_JS_divergences$Template)){
+  g <- longer_data_JS_divergences %>% filter(Template == template) %>% ggplot(aes(x = Type, y = JSD)) +
+    geom_boxplot() +
+    theme_classic() +
+    facet_wrap(. ~ model) +
+    ggtitle(paste("Template: ", template))
+  plot(g)
+}
+```
+
+
+# Compute with proportion test
+
+## Comptue proportion test: 
+
+By re-sampling 5000 JS-divergence fron the different set, estimate:
+  - the proportion of PosxNeg > NegxNeg
+  - the proportion of PosxNeg > PosxPos
+
+Simply 
+```{r}
+
+n <- 5000
+
+prop_data_computation <- longer_data_JS_divergences %>% select(model, Template) %>% distinct()
+prop_data_computation$vs_Neg <- 0
+prop_data_computation$vs_Pos <- 0
+
+for (i in 1:nrow(prop_data_computation)) {
+  
+  model <- prop_data_computation[i, ]$model
+  template <- prop_data_computation[i, ]$Template
+  
+  # Compare PosxNeg to Posxpos:
+  PosxNeg <- sample(longer_data_JS_divergences[longer_data_JS_divergences$model == model & longer_data_JS_divergences$Template == template & longer_data_JS_divergences$Type == "PosxNeg", ]$JSD, replace = T, size = n)
+  NegxNeg <- sample(longer_data_JS_divergences[longer_data_JS_divergences$model == model & longer_data_JS_divergences$Template == template & longer_data_JS_divergences$Type == "NegxNeg", ]$JSD, replace = T, size = n)
+  PosxPos <- sample(longer_data_JS_divergences[longer_data_JS_divergences$model == model & longer_data_JS_divergences$Template == template & longer_data_JS_divergences$Type == "PosxPos", ]$JSD, replace = T, size = n)
+  
+  prop_data_computation[i, ]$vs_Neg <- ( sum(PosxNeg > NegxNeg) / n )
+  prop_data_computation[i, ]$vs_Pos <- ( sum(PosxNeg > PosxPos) / n )
+}
+```
+
+## Plot heatmaps
+
+
+### Compare with PosxPos
+
+```{r}
+# Give extreme colors:
+ggplot(prop_data_computation, aes(model, factor(Template), fill = vs_Neg)) + 
+  geom_tile(color = "white",
+            lwd = 1.5,
+            linetype = 1) +
+  geom_text(aes(label = round(vs_Neg, 2)), color = "white", size = 6) +
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "#FFFFCC",
+                       high = "#FF0000",
+                       limits = c(0,1)) +
+  coord_fixed() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 20), axis.text.y = element_text(size = 20))
+
+```
+
+### Compare with PosxPos
+```{r}
+# Give extreme colors:
+ggplot(prop_data_computation, aes(model, factor(Template), fill = vs_Pos)) + 
+  geom_tile(color = "white",
+            lwd = 1.5,
+            linetype = 1) +
+  geom_text(aes(label = round(vs_Pos, 2)), color = "white", size = 6) +
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "#FFFFCC",
+                       high = "#FF0000",
+                       limits = c(0,1)) +
+  coord_fixed() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 20), axis.text.y = element_text(size = 20))
+```
+
+
+In the both cases we see that pour toutes les combinaison de Template x Model, la proportion de fois ou la divergence obtenue en comparant positif vs négatifs à des paires issues du même set n'est jamais supérieure à 0.6.
+
+On a donc pareil une très faible taille d'effet.
+
+## Top 20 tokens
+WARNING: COUNTS ARE (EXPECTED COUNTS) SUM OF PROBA
+
+```{r}
+DT::datatable(top_20, filter = 'top')
+
+```
+
+## Top 1 cor
+
+```{r}
+# Give extreme colors:
+ggplot(top1_cor, aes(model, factor(Template), fill = cors)) + 
+  geom_tile(color = "white",
+            lwd = 1.5,
+            linetype = 1) +
+  geom_text(aes(label = round(cors, 2)), color = "white", size = 6) +
+  scale_fill_gradient2(low = "#075AFF",
+                       mid = "#FFFFCC",
+                       high = "#FF0000",
+                       limits = c(0,1)) +
+  coord_fixed() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 20), axis.text.y = element_text(size = 20))
+```
+
+
+Donc pareil au niveau de la corrélation entre les top 1 token prédits.
+

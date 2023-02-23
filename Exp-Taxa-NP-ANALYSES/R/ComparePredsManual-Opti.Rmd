@@ -1,0 +1,459 @@
+---
+title: "Conpare preds Manual and Opti"
+author: "Maxime Delmas"
+date: "2023-02-17"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(rjson)
+library(PTXQC)
+library(DT)
+library(stringr)
+```
+
+
+
+```{r}
+
+read_predictions <- function(path){
+  json.str <- readLines(path, ok = T, warn = F)
+  json.data <- fromJSON(json.str[1])
+  return(json.data)
+}
+
+# From the json data, creates the data.frame, with columns: subject.id, preds.label, preds.probas, rank
+extract_prediction_proba_pairs <- function(json.data){
+  
+  # Get length
+  N <- length(json.data[["result"]])
+  M <- length(json.data[["result"]][[1]][["preds"]])
+  
+  # inti the dataset
+  dataset <- data.frame(subject.id = vector("character", N * M), preds.label = vector("character", N * M), preds.probas = vector("numeric", N * M), preds.rank = rep(c(1:M), N))
+  
+  for(i in 1:N) {
+    
+    # get the data and fill to the corresponding indexes.
+    result <- json.data[["result"]][[i]]
+    
+    splited.uuid <- strsplit(result[["uuid"]], "-")[[1]]
+    subject.id <- splited.uuid[1]
+    
+    # preds
+    preds <- unlist(result[["preds"]])
+    preds.label <- preds[seq(1, length(preds), 2)]
+    preds.probas <- preds[seq(2, length(preds), 2)]
+    
+    
+    is.correct <- rep(FALSE, M)
+    if(length(result[["corrected_preds"]]) > 0) {
+      # correct preds
+      correct.preds <- unlist(result[["corrected_preds"]])
+      correct.preds.label <- correct.preds[seq(1, length(correct.preds), 2)]
+      correct.preds.rank <- as.numeric(correct.preds[seq(2, length(correct.preds), 2)])
+      
+      # test if preds in correct preds
+      is.correct <- preds.label %in% correct.preds.label
+    }
+    
+    dataset[(M*(i - 1) + 1):(M * i ), "subject.id"] <- subject.id
+    dataset[(M*(i - 1) + 1):(M * i ), "preds.label"] <- preds.label
+    dataset[(M*(i - 1) + 1):(M * i ), "preds.probas"] <- as.numeric(preds.probas)
+    dataset[(M*(i - 1) + 1):(M * i ), "is.correct"] <- is.correct
+    
+  }
+  return(dataset)
+}
+
+
+create_histogram <- function(big.df){
+  data_for_plot <- big.df %>% filter(rank.in.masked > 0) %>% select(ref, preds.rank, rank.in.masked) %>% rename("exp" = "preds.rank", "mask" = "rank.in.masked") %>% pivot_longer(c("exp", "mask"), names_to="rank.in", values_to="rank")
+  data_for_plot$rank <- factor(data_for_plot$rank, levels = 1:50)
+  data_for_plot <- data_for_plot %>% group_by(ref, rank.in, rank, .drop=F) %>% summarise(n = n())
+  data_for_plot <- data_for_plot %>% group_by(ref, rank.in) %>% mutate(freq = (n/sum(n)) * 100)
+  
+  p <- data_for_plot %>% ggplot(aes(x = rank, y = freq, fill = rank.in)) +
+    geom_bar(stat="identity", color="black", position=position_dodge()) +
+    theme_classic() +
+    facet_wrap(. ~ ref) +
+    theme(axis.text = element_text(size = 10), axis.text.x = element_text(hjust = 1)) +
+    ylim(c(0,100))
+  
+  return(p)
+}
+
+create_plot2 <- function(big.df){
+  for(ref in unique(big.df$ref)){
+      sub.df <- big.df[big.df$ref == ref, ]
+      data_for_plot <- sub.df %>% mutate(masked.rank.bin = cut(rank.in.masked, breaks = c(-1, 1, 2, 5, 10, 20, 50), labels = c('exclusive', "top1", "top [2-5[", "top [5-10[", "[10-20[", "[20-50["), include.lowest = T, right = F))
+      data_for_plot <- data_for_plot %>% group_by(ref, preds.rank, masked.rank.bin) %>% summarise(n = n())
+      data_for_plot <- data_for_plot %>% group_by(ref, preds.rank) %>% mutate(prop = (n/sum(n)) * 100)
+      data_for_plot$masked.rank.bin <- factor(data_for_plot$masked.rank.bin, levels = c('exclusive', "top1", "top [2-5[", "top [5-10[", "[10-20[", "[20-50["))
+      
+      p <- data_for_plot %>% ggplot(aes(x = preds.rank, y = prop, fill = masked.rank.bin)) +
+        geom_bar(stat="identity") +
+        theme_classic() +
+        scale_fill_discrete(drop=FALSE) +
+        theme(axis.text = element_text(size = 20), text = element_text(size = 15)) +
+        ggtitle(paste("property= ", ref))
+      plot(p)
+  }
+}
+
+# x a single str
+# y a list of str to compare.
+# find the longest common prefix between x and the list of string y.
+
+longest_common_prefix <- function(x, y) {
+    # Remove punctation or digit characters (if chemical for instance):
+    process_str <- function(x) {
+      tolower(gsub('[[:punct:][:digit:]]+','',x))
+    }
+    x.processed <- process_str(x)
+    y.processed <- sapply(y, FUN = process_str, simplify = T, USE.NAMES = F)
+    
+    longest <- 0
+    # cut x by space
+    for (ind.x in strsplit(x.processed, " ")[[1]]) {
+      
+      # also test on all y cuted by space
+      for(ind.y in unlist(sapply(y.processed, FUN = function(x){strsplit(x, " ")}, simplify = T, USE.NAMES = F)) ){
+        
+        # test if longest prefix is
+        l <- nchar(longestCommonPrefix(c(ind.x, ind.y)))
+        
+        if(l > longest){
+          longest <- l
+        }
+      }
+    }
+    return(longest)
+}
+
+read_test_data <- function(path){
+  
+  lines <- readLines(path, ok = T, warn = F)
+  
+  N <- length(lines)
+  
+  out <- data.frame("subject.id" = vector("character", N), "subject.label" = vector("character", N), "object.labels" = vector("character", N), LCP = vector("numeric", N))
+
+  for(index in 1:N){
+    
+    line <- lines[index]
+    
+    json.data <- fromJSON(line)
+    
+    subject.id <- json.data[["sub_uri"]]
+    
+    # On ne considère pas les synonymes car ils ne sont pas envoyé au modèle.
+    subject.label <- json.data[["sub_label"]]
+    
+    object.labels <- c(json.data[["obj_label"]], unlist(json.data[["obj_aliases"]]))
+    
+    LCP <- longest_common_prefix(x = subject.label, object.labels)
+    
+    out[index, "subject.id"] <- subject.id
+    out[index, "subject.label"] <- subject.label
+    out[index, "object.labels"] <- paste(object.labels, collapse="; ")
+    out[index, "LCP"] <- LCP
+  }
+  return(out)
+}
+
+frequency_of_object_in_test_data <- function(path){
+  
+  name_normalise <- function(name){
+    
+    # lower
+    name <- tolower(name)
+    
+    # remove punctuation and space
+    name <- gsub("[[:punct:]]", "", name)
+    
+    # remove articles
+    name <- gsub("\\b(a|an|the)\\b", "", name, perl = T)
+    
+    # fix white spaces
+    name_ <- str_split(name, "\\s+", simplify = T)
+    name <- paste(name_[name_ != ""], collapse = " ")
+    return(name)
+  }
+  
+  lines <- readLines(path, ok = T, warn = F)
+  
+  N <- length(lines)
+  
+  # dict to map names of predictions to ids
+  names_to_id <- list()
+  id_to_count <-  list()
+  
+  for(index in 1:N){
+    
+    line <- lines[index]
+    
+    json.data <- fromJSON(line)
+    
+    objects.uris <- json.data[["obj_uris"]]
+    for(i in 1:length(objects.uris)){
+        
+      uri <- objects.uris[i]
+        
+      # first time we meet this id ?
+        if (! uri %in% names_to_id) {
+            
+            for (name  in c(json.data[["obj_labels"]][i], unlist(json.data[["obj_aliases"]][i]) )) {
+              names_to_id[[name_normalise(name)]] <- uri
+            }
+            id_to_count[[uri]] <- 1
+        }
+
+        # not the first time, increment count
+        else{
+            id_to_count[[uri]] <- id_to_count[[uri]] + 1
+        }
+    }
+  }
+  return(list(names_to_id, id_to_count))
+  
+}
+
+
+bias_from_training_dataset <- function(path_to_train, l_train, bif.df, ref, top=10){
+  
+  prediction_data <- bif.df[bif.df$ref == ref, ]
+  prop_stats <- frequency_of_object_in_test_data(path_to_train)
+  prop_name_to_id <- prop_stats[[1]]
+  prop_id_to_count <- prop_stats[[2]]
+  df_prop_id_to_count <- data.frame(object.id = names(prop_id_to_count), count_in_train = as.integer(prop_id_to_count))
+  # On fait le top par rapport aux rank et noms directement aux object.ids, comme ça, si jamis plusieurs objets ont la fréquence atteinte au top choisi, alors tous sont gardés.
+  temp_df <- data_frame(count_in_train = unique(df_prop_id_to_count$count_in_train))
+  temp_df <- temp_df[order(temp_df$count_in_train, decreasing = T), ]
+  temp_df$index <- 1:nrow(temp_df)
+  temp_df$isintop <- temp_df$index <= top
+
+  df_prop_id_to_count <- df_prop_id_to_count %>% left_join((temp_df %>% select(count_in_train, isintop)), by = "count_in_train")
+  
+  df_prop_name_to_id <- data.frame(preds.label = names(prop_name_to_id),  object.id = as.character(prop_name_to_id))
+ 
+  prediction_data <- prediction_data %>% left_join(df_prop_name_to_id, by = "preds.label") %>% left_join(df_prop_id_to_count, by = "object.id")
+  prediction_data[is.na(prediction_data$isintop), ]$isintop <- FALSE
+  
+  data_for_plot <- prediction_data %>% group_by(preds.rank, isintop) %>% summarise(n = n())
+  data_for_plot <- data_for_plot %>% group_by(preds.rank) %>% mutate(prop = (n/sum(n)) * 100)
+  
+  p <- data_for_plot %>% ggplot(aes(x = preds.rank, y = prop, fill = isintop)) +
+  geom_bar(stat="identity") +
+  theme_classic() +
+  scale_fill_discrete(drop=FALSE) +
+  theme(axis.text = element_text(size = 20), text = element_text(size = 15)) +
+  ggtitle(paste("property= ", ref))
+  plot(p)
+}
+
+```
+
+
+
+# DATA
+Attention, respecter la nomenclature: prop-model_name
+```{r}
+
+model_ref <- c("P703-MANUAL-PubMedBERT*", "rP703-MANUAL-PubMedBERT-full*", "P703-OPTI-PubMedBERT-full*", "rP703-OPTI-PubMedBERT-full*")
+
+model_res <- c("output/np/manual/PubMedBERT/manual2/confidence/none/P703.json",
+               "output/np/manual/PubMedBERT-full/manual1/order/confidence/rP703.json", 
+               "output/np/opti/PubMedBERT-full/manual1/order/none/P703.json",
+               "output/np/opti/PubMedBERT-full/FS/order/confidence/rP703.json")
+
+
+test_data <- c("data/np/triples_processed/P703/test.jsonl", "data/np/triples_processed/rP703/test.jsonl")
+
+```
+
+
+```{r}
+
+list.of.df <- list()
+
+for(index in 1:4){
+  
+  print("<=====================")
+  print(model_ref[index])
+  p1 <- model_res[index]
+  
+  print(paste("- Std. file at: ", p1))
+
+  std <- extract_prediction_proba_pairs(read_predictions(p1)) %>% distinct()
+  
+  # comp <- compare_std_exp_to_masked(std, masked)
+  
+  # fill with metadata
+  std$ref <- model_ref[index]
+  
+  temp <- str_split(model_ref[index], "-", simplify = T)
+  std$prop <- temp[1]
+  std$EXP <- temp[2]
+  
+  list.of.df[[index]] <- std
+  
+  print("=====================>")
+  
+  index <- index + 1
+}
+          
+big.df <- do.call("rbind", list.of.df)
+
+# remove null predictions (== "") or prediction that are just a number.
+big.df <- big.df[ (big.df$preds.label != "") , ]
+```
+
+```{r}
+
+props <- c("P703", "rP703")
+train_data <- c("data/np/triples_processed/P703/train.jsonl", "data/np/triples_processed/rP703/train.jsonl")
+top <- 10
+
+
+for(i in 1:2){
+  
+  # filter on property
+  sub.df <- big.df[big.df$prop == props[i], ]
+  
+  # On cherche les sujets pour lesquels on a eu au moins 1 bonne réponse avec la stratégie MANUAL ou OPTI
+  manual_sub.df <- sub.df %>% filter(EXP == "MANUAL") %>% select(subject.id, is.correct) %>% group_by(subject.id) %>% summarise(is.correct.manual = any(is.correct))
+  opti_sub.df <- sub.df %>% filter(EXP == "OPTI") %>% select(subject.id, is.correct) %>% group_by(subject.id) %>% summarise(is.correct.opti = any(is.correct))
+  print(nrow(opti_sub.df))
+  fused_pred <- manual_sub.df %>% left_join(opti_sub.df, by = "subject.id")
+  
+  # On récupére que les sujets pour lesquels on a eu une bonne réponse en OPTI et pas en manual
+  fused_pred <- fused_pred %>% filter(!is.correct.manual & is.correct.opti)
+  
+  # On récupère le label de la prédiction
+  fused_pred <- fused_pred %>% left_join((sub.df %>% filter(EXP == "OPTI") %>% select(subject.id, preds.label, preds.rank, is.correct)), by = c("subject.id", "is.correct.opti"="is.correct"))
+  
+  
+  # get training data stats
+  prop_stats <- frequency_of_object_in_test_data(train_data[i])
+  prop_name_to_id <- prop_stats[[1]]
+  prop_id_to_count <- prop_stats[[2]]
+  
+  # Annotate the top 10 of most frequent objects in the dataset.
+  df_prop_id_to_count <- data.frame(object.id = names(prop_id_to_count), count_in_train = as.integer(prop_id_to_count))
+  # On fait le top par rapport aux rank et noms directement aux object.ids, comme ça, si jamis plusieurs objets ont la fréquence atteinte au top choisit, alors tous sont gardés.
+  temp_df <- data_frame(count_in_train = unique(df_prop_id_to_count$count_in_train))
+  temp_df <- temp_df[order(temp_df$count_in_train, decreasing = T), ]
+  temp_df$index <- 1:nrow(temp_df)
+  temp_df$isintop <- temp_df$index <= top
+
+  df_prop_id_to_count <- df_prop_id_to_count %>% left_join((temp_df %>% select(count_in_train, isintop)), by = "count_in_train")
+  
+  df_prop_name_to_id <- data.frame(preds.label = names(prop_name_to_id),  object.id = as.character(prop_name_to_id))
+  
+  # ON ajoute les stats de counts + s'ils font parti du TOP 10 dans le tableau et on est prêt pour le plot ! 
+  fused_pred <- fused_pred %>% left_join(df_prop_name_to_id, by = "preds.label") %>% left_join(df_prop_id_to_count, by = "object.id")
+  fused_pred[is.na(fused_pred$isintop), ]$isintop <- FALSE 
+  fused_pred$preds.rank <- factor(fused_pred$preds.rank, levels = 1:50)
+  
+  print(paste("Proportion of gained correcte preds with opti-prompt that involed object that are in the top 10 most frequent in the training set:", (sum(fused_pred$isintop) / nrow(fused_pred)) * 100 ))
+  
+  p <- ggplot(fused_pred, aes(x = preds.rank, fill = isintop)) +
+    geom_bar(stat = "count") +
+  scale_x_discrete(drop=FALSE) +
+    theme_classic() +
+  theme(axis.text = element_text(size = 20), text = element_text(size = 15)) +
+  ggtitle(paste("Rank distribution of correct predictions gained with opti-prompt, \n coloured by their membership of the top 10 object in the training dataset (", props[i], ")"))
+  plot(p)
+}
+
+```
+
+
+Ce que l'on constate c'est qu'en majorité sur les bonnes réponses que l'on a gagnées, il s'agit en réalité d'objet qui sont les plus fréquent dans notre dataset de train. Cela suggère que notre modèle aurait pu pendant l'entrainement simplement chercher à se rapprocher de la distribution des réponse du dataset, mais n'aurait pas nécessairement appris à se "rappeler" !
+
+
+
+
+
+
+
+
+
+
+* * *
+
+
+
+## L'inverse pour tester:
+
+C'est à dire sur celle que l'on a perdu !!
+
+```{r, run=FALSE}
+
+
+props <- c("P703", "rP703")
+train_data <- c("data/np/triples_processed/P703/train.jsonl", "data/np/triples_processed/rP703/train.jsonl")
+top <- 10
+
+
+for(i in 1:2){
+  
+  # filter on property
+  sub.df <- big.df[big.df$prop == props[i], ]
+  
+  # On cherche les sujets pour lesquels on a eu au moins 1 bonne réponse avec la stratégie MANUAL ou OPTI
+  manual_sub.df <- sub.df %>% filter(EXP == "MANUAL") %>% select(subject.id, is.correct) %>% group_by(subject.id) %>% summarise(is.correct.manual = any(is.correct))
+  opti_sub.df <- sub.df %>% filter(EXP == "OPTI") %>% select(subject.id, is.correct) %>% group_by(subject.id) %>% summarise(is.correct.opti = any(is.correct))
+  print(nrow(opti_sub.df))
+  fused_pred <- manual_sub.df %>% left_join(opti_sub.df, by = "subject.id")
+  
+  # On récupére que les sujets pour lesquels on a eu une bonne réponse en OPTI et pas en manual
+  fused_pred <- fused_pred %>% filter(is.correct.manual & !is.correct.opti)
+  
+  # On récupère le label de la prédiction
+  fused_pred <- fused_pred %>% left_join((sub.df %>% filter(EXP == "MANUAL") %>% select(subject.id, preds.label, preds.rank, is.correct)), by = c("subject.id", "is.correct.manual"="is.correct"))
+  
+  
+  # get training data stats
+  prop_stats <- frequency_of_object_in_test_data(train_data[i])
+  prop_name_to_id <- prop_stats[[1]]
+  prop_id_to_count <- prop_stats[[2]]
+  
+  # Annotate the top 10 of most frequent objects in the dataset.
+  df_prop_id_to_count <- data.frame(object.id = names(prop_id_to_count), count_in_train = as.integer(prop_id_to_count))
+  # On fait le top par rapport aux rank et noms directement aux object.ids, comme ça, si jamis plusieurs objets ont la fréquence atteinte au top choisit, alors tous sont gardés.
+  temp_df <- data_frame(count_in_train = unique(df_prop_id_to_count$count_in_train))
+  temp_df <- temp_df[order(temp_df$count_in_train, decreasing = T), ]
+  temp_df$index <- 1:nrow(temp_df)
+  temp_df$isintop <- temp_df$index <= top
+
+  df_prop_id_to_count <- df_prop_id_to_count %>% left_join((temp_df %>% select(count_in_train, isintop)), by = "count_in_train")
+  
+  df_prop_name_to_id <- data.frame(preds.label = names(prop_name_to_id),  object.id = as.character(prop_name_to_id))
+  
+  # ON ajoute les stats de counts + s'ils font parti du TOP 10 dans le tableau et on est prêt pour le plot ! 
+  fused_pred <- fused_pred %>% left_join(df_prop_name_to_id, by = "preds.label") %>% left_join(df_prop_id_to_count, by = "object.id")
+  fused_pred[is.na(fused_pred$isintop), ]$isintop <- FALSE 
+  fused_pred$preds.rank <- factor(fused_pred$preds.rank, levels = 1:50)
+  
+  print(paste("Proportion of gained correcte preds with opti-prompt that involed object that are in the top 10 most frequent in the training set:", (sum(fused_pred$isintop) / nrow(fused_pred)) * 100 ))
+  
+  p <- ggplot(fused_pred, aes(x = preds.rank, fill = isintop)) +
+    geom_bar(stat = "count") +
+  scale_x_discrete(drop=FALSE) +
+  theme(axis.text = element_text(size = 20), text = element_text(size = 15)) +
+  ggtitle(paste("Rank distribution of correct predictions gained with opti-prompt, \n coloured by their membership of the top 10 object in the training dataset (", props[i], ")"))
+  plot(p)
+}
+
+```
+
+
+```
+
+
+

@@ -1,0 +1,85 @@
+DEFINE input:inference "schema-inference-rules"
+
+select ?fungi_id (STRAFTER(STR(?compound), "http://rdf.ncbi.nlm.nih.gov/pubchem/compound/CID")as ?pubchem_id) ?nb_ref
+FROM <https://abroad/mycobank-taxonomy>
+FROM <https://abroad/species2pubchem>
+FROM <https://abroad/pubchem/compound>
+FROM <https://abroad/chebi>
+WHERE
+{
+	{
+		SELECT ?assos (count(distinct ?ref) as ?nb_ref)
+		WHERE
+		{
+			?assos sio:SIO_000628 ?fungi, ?compound ;
+				sio:SIO_000253 ?ref	
+			
+		}
+		GROUP BY ?assos
+	}
+	?assos sio:SIO_000628 ?fungi, ?compound .
+
+	?fungi a dwc:Taxon ;
+		dwc:taxonRank "species" ;
+		dwc:taxonID ?fungi_id .
+
+	?compound a chebi:23367 .
+}
+
+
+# Eqsier for transitivity without implicit inference
+select distinct ?fungi_id ?fungi_name ?family_name
+FROM <https://abroad/mycobank-taxonomy>
+WHERE
+{
+	?fungi dwc:taxonRank "species" ;
+		dwc:taxonID ?fungi_id ;
+		rdfs:label ?fungi_name .
+
+?fungi abroad:isSynonymTaxonOf/abroad:isChildTaxonOf+|abroad:isChildTaxonOf+ ?ancestor .
+
+	?ancestor dwc:taxonRank "family" ;
+		rdfs:label ?family_name .
+}
+
+
+
+DEFINE input:inference "schema-inference-rules"
+
+select distinct (STRAFTER(STR(?compound), "http://rdf.ncbi.nlm.nih.gov/pubchem/compound/CID")as ?pubchem_id)  ?y
+FROM <https://abroad/chebi>
+FROM <https://abroad/mycobank-taxonomy>
+FROM <https://abroad/species2pubchem>
+FROM <https://abroad/pubchem/compound>
+where
+{
+?fungi a dwc:Taxon ;
+	dwc:taxonRank "species" ;
+	abroad:taxonProduces ?compound .
+
+?compound rdf:type ?chebi .
+
+?chebi  rdfs:subClassOf [ a owl:Restriction ;
+		owl:onProperty obo:RO_0000087 ;
+		owl:someValuesFrom ?role ] ;
+	
+	<http://www.geneontology.org/formats/oboInOwl#inSubset> <http://purl.obolibrary.org/obo/chebi#3_STAR>
+	
+BIND ( exists{ ?role rdfs:subClassOf* chebi:33281 } AS ?y)
+}
+
+
+
+
+DEFINE input:inference "schema-inference-rules"
+
+select distinct (STRAFTER(STR(?compound), "http://rdf.ncbi.nlm.nih.gov/pubchem/compound/CID")as ?pubchem_id)
+FROM <https://abroad/mycobank-taxonomy>
+FROM <https://abroad/species2pubchem>
+FROM <https://abroad/pubchem/compound>
+where
+{
+?fungi a dwc:Taxon ;
+	dwc:taxonRank "species" ;
+	abroad:taxonProduces ?compound .
+}

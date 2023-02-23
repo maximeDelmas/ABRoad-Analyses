@@ -1,0 +1,300 @@
+---
+title: "CompareAccManual-Opti"
+author: "Maxime Delmas"
+date: "2023-02-14"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+```
+
+
+```{r}
+
+read_manual_summary <- function(path){
+
+    block_l <- 8
+    data <- data.frame()
+    
+    # read lines:
+    lines <- readLines(path)
+    n_block <- length(lines) / block_l
+    
+    parsed_data <- data.frame()
+    
+    block_start_index <- seq(1, length(lines), block_l)
+    
+    for(i in 1:n_block){
+      
+      # get block
+      block <- lines[block_start_index[i]:(block_start_index[i] + block_l - 1)]
+      
+      # get metadata
+      metadata <- strsplit(block[1], "/")[[1]]
+      model <- metadata[4]
+      prompt <- metadata[5]
+      init <- metadata[6]
+      iter <- metadata[7]
+      
+      prop1acc <- strsplit(block[4], "\t")[[1]]
+      prop2acc <- strsplit(block[5], "\t")[[1]]
+      
+      subdata <- data.frame(model = model, prompt = prompt, init = init, iter = iter, property = c("rP703", "rP703", "P703", "P703"), accType = c("Acc@1", "Acc@5", "Acc@1", "Acc@5"), acc = c(prop1acc[2], prop1acc[3], prop2acc[2], prop2acc[3]))
+      
+      parsed_data <- rbind(parsed_data, subdata)
+    }
+    
+    parsed_data$model <- factor(parsed_data$model, levels = c("ChemicalBERT", "BioBERT", "PubMedBERT", "PubMedBERT-full"))
+    parsed_data$prompt <- factor(parsed_data$prompt, levels = c("manual1", "manual2"))
+    parsed_data$init <- factor(parsed_data$init, levels = c("independent", "order", "confidence"))
+    parsed_data$iter <- factor(parsed_data$iter, levels = c("none", "order", "confidence"))
+    
+    parsed_data$acc <- as.numeric(parsed_data$acc)
+
+    # FIX prompt labeling (Cf. Daily note 15/02/2012)
+    parsed_data$prompt <- as.character(parsed_data$prompt)
+    parsed_data[parsed_data$property == "P703" & parsed_data$prompt == "manual1", ]$prompt <- "toChange"
+    parsed_data[parsed_data$property == "P703" & parsed_data$prompt == "manual2", ]$prompt <- "manual1"
+    parsed_data[parsed_data$property == "P703" & parsed_data$prompt == "toChange", ]$prompt <- "manual2"
+    parsed_data$prompt <- factor(parsed_data$prompt, levels = c("manual1", "manual2"))
+    
+    return(parsed_data)
+
+}
+
+read_opti_summary <- function(path){
+  
+  block_l <- 8
+  data <- data.frame()
+  
+  # read lines:
+  lines <- readLines(path)
+  n_block <- length(lines) / block_l
+  
+  parsed_data <- data.frame()
+  
+  block_start_index <- seq(1, length(lines), block_l)
+  
+  for(i in 1:n_block){
+    
+    # get block
+    block <- lines[block_start_index[i]:(block_start_index[i] + block_l - 1)]
+    
+    # get metadata
+    metadata <- strsplit(block[1], "/")[[1]]
+    model <- metadata[4]
+    prompt <- metadata[5]
+    init <- metadata[6]
+    iter <- metadata[7]
+    
+    prop1acc <- strsplit(block[4], "\t")[[1]]
+    prop2acc <- strsplit(block[5], "\t")[[1]]
+    
+    subdata <- data.frame(model = model, prompt = prompt, init = init, iter = iter, property = c("P703", "P703", "rP703", "rP703"), accType = c("Acc@1", "Acc@5", "Acc@1", "Acc@5"), acc = c(prop1acc[2], prop1acc[3], prop2acc[2], prop2acc[3]))
+    
+    parsed_data <- rbind(parsed_data, subdata)
+  }
+  
+  parsed_data$model <- factor(parsed_data$model, levels = c("ChemicalBERT", "BioBERT", "PubMedBERT", "PubMedBERT-full"))
+  parsed_data$prompt <- factor(parsed_data$prompt, levels = c("manual1", "manual2", "FS"))
+  parsed_data$init <- factor(parsed_data$init, levels = c("independent", "order", "confidence"))
+  parsed_data$iter <- factor(parsed_data$iter, levels = c("none", "order", "confidence"))
+  
+  parsed_data$acc <- as.numeric(parsed_data$acc)
+  
+  # Fix prompt labelling (Cf. Daily note 15/02/2012)
+  parsed_data$prompt <- as.character(parsed_data$prompt)
+  parsed_data[parsed_data$property == "P703" & parsed_data$prompt == "manual1", ]$prompt <- "toChange"
+  parsed_data[parsed_data$property == "P703" & parsed_data$prompt == "manual2", ]$prompt <- "manual1"
+  parsed_data[parsed_data$property == "P703" & parsed_data$prompt == "toChange", ]$prompt <- "manual2"
+  parsed_data$prompt <- factor(parsed_data$prompt, levels = c("manual1", "manual2", "FS"))
+  
+  return(parsed_data)
+}
+
+
+
+frequency_of_object_in_test_data <- function(path){
+  
+  name_normalise <- function(name){
+    
+    # lower
+    name <- tolower(name)
+    
+    # remove punctuation and space
+    name <- gsub("[[:punct:]]", "", name)
+    
+    # remove articles
+    name <- gsub("\\b(a|an|the)\\b", "", name, perl = T)
+    
+    # fix white spaces
+    name_ <- str_split(name, "\\s+", simplify = T)
+    name <- paste(name_[name_ != ""], collapse = " ")
+    return(name)
+  }
+  
+  lines <- readLines(path, ok = T, warn = F)
+  
+  N <- length(lines)
+  
+  # dict to map names of predictions to ids
+  names_to_id <- list()
+  id_to_count <-  list()
+  
+  for(index in 1:N){
+    
+    line <- lines[index]
+    
+    json.data <- fromJSON(line)
+    
+    objects.uris <- json.data[["obj_uris"]]
+    for(i in 1:length(objects.uris)){
+        
+      uri <- objects.uris[i]
+        
+      # first time we meet this id ?
+        if (! uri %in% names_to_id) {
+            
+            for (name  in c(json.data[["obj_labels"]][i], unlist(json.data[["obj_aliases"]][i]) )) {
+              names_to_id[[name_normalise(name)]] <- uri
+            }
+            id_to_count[[uri]] <- 1
+        }
+
+        # not the first time, increment count
+        else{
+            id_to_count[[uri]] <- id_to_count[[uri]] + 1
+        }
+    }
+  }
+  return(list(names_to_id, id_to_count))
+  
+}
+
+```
+
+
+# read summary acc data
+```{r}
+acc.manual <- read_manual_summary("output/np/manual/summary_ACC.txt")
+acc.opti <- read_opti_summary("output/np/opti/summary_ACC.txt")
+```
+
+## Comparison
+
+Le but ici est de prendre le meilleur modèle avec des prompts manuels et de comparer les performances obtenues par rapport aux modèles avec les mêmes paramètres et la stratégie opti-prompt.
+
+* On compare aussi au meilleur modèle avec opti-pronpt
+
+* On compare aussi toujours l'Acc@5
+
+* Les meilleurs modèles avec la stratégie *manual* sont 
+  * Pour **P703**: model=PubMedBERT; prompt=manual1; init=confidence; iter=none
+  * Pour **rP703**: model=PubMedBERT-full; prompt=manual1; init=order; iter=confidence
+
+* Les meilleurs modèles avec la stratégie *opti-prompt* sont:
+  * Pour **P703**: model=PubMedBERT-full ; prompt=manual2 ; init=order ; iter=none
+  * Pour **rP703**: model=PubMedBERT-full ; prompt=FS ; init=order ; iter=confidence
+
+```{r}
+acc5.manual.P703.best <- acc.manual[acc.manual$model == "PubMedBERT" & acc.manual$prompt == "manual1" & acc.manual$init == "confidence" & acc.manual$iter == "none" & acc.manual$accType == "Acc@5" & acc.manual$property == "P703", ]$acc
+print(paste("Acc@5 for P703 - manual best model: ", acc5.manual.P703.best))
+acc5.manual.rP703.best <- acc.manual[acc.manual$model == "PubMedBERT-full" & acc.manual$prompt == "manual1" & acc.manual$init == "order" & acc.manual$iter == "confidence" & acc.manual$accType == "Acc@5" & acc.manual$property == "rP703", ]$acc
+print(paste("Acc@5 for rP703 - manual best model: ", acc5.manual.rP703.best))
+
+acc5.opti.P703.eq <- acc.opti[acc.opti$model == "PubMedBERT" & acc.opti$prompt == "manual1" & acc.opti$init == "confidence" & acc.opti$iter == "none" & acc.opti$accType == "Acc@5" & acc.opti$property == "P703", ]$acc
+print(paste("Acc@5 for P703 - opti eq model as best manual: ", acc5.opti.P703.eq))
+acc5.opti.rP703.eq <- acc.opti[acc.opti$model == "PubMedBERT-full" & acc.opti$prompt == "manual1" & acc.opti$init == "order" & acc.opti$iter == "confidence" & acc.opti$accType == "Acc@5" & acc.opti$property == "rP703", ]$acc
+print(paste("Acc@5 for rP703 - opti eq model as best manual: ", acc5.opti.rP703.eq))
+
+acc5.opti.P703.best <- acc.opti[acc.opti$model == "PubMedBERT-full" & acc.opti$prompt == "manual2" & acc.opti$init == "order" & acc.opti$iter == "none" & acc.opti$accType == "Acc@5" & acc.opti$property == "P703", ]$acc
+print(paste("Acc@5 for rP703 - opti best model: ", acc5.opti.P703.best))
+acc5.opti.rP703.best <- acc.opti[acc.opti$model == "PubMedBERT-full" & acc.opti$prompt == "FS" & acc.opti$init == "order" & acc.opti$iter == "confidence" & acc.opti$accType == "Acc@5" & acc.opti$property == "rP703", ]$acc
+print(paste("Acc@5 for P703 - opti best model: ", acc5.opti.rP703.best))
+
+summary <- data.frame(model = rep(c("manual*", "opti-eq", "opti*"), 2), property = c(rep("P703", 3), rep("rP703", 3)), "Acc" = c(acc5.manual.P703.best, 
+                                                                                                                                  acc5.opti.P703.eq,
+                                                                                                                                  acc5.opti.P703.best, 
+                                                                                                                                  acc5.manual.rP703.best, 
+                                                                                                                                  acc5.opti.rP703.eq, 
+                                                                                                                                  acc5.opti.rP703.best) )
+
+
+max_func <- function(x){
+  return(data.frame(y = max(x) + 1, label = paste0("max = ",max(x))))
+}
+
+ggplot(summary, aes(x = model, y = Acc, fill = model)) +
+  geom_bar(stat = "identity") +
+  theme_classic() +
+  stat_summary(fun.data = max_func, geom = "text", size = 8) +
+  facet_grid(. ~ property) +
+  theme(axis.text = element_text(size = 30), text = element_text(size = 30)) +
+  ylim(c(0, 10)) +
+  ylab("Acc@5") 
+```
+
+
+
+* * * 
+
+Pour continuer la comparaison avec les mdèles, j'aimerai tester a quel point un modèle simple, qui prédit toujours la classe majoritaire du training set se débrouillerai:
+
+```{r}
+
+get_naive_model_perf <- function(train_path, test_path, N){
+  # get training data stats
+  train_prop_stats <- frequency_of_object_in_test_data(train_path)
+  train_prop_id_to_count <- train_prop_stats[[2]]
+  
+  train_df_prop_id_to_count <- data.frame(object.id = names(train_prop_id_to_count), count_in_train = as.integer(train_prop_id_to_count))
+  
+  # Ordering by counts
+  train_df_prop_id_to_count <- train_df_prop_id_to_count[order(train_df_prop_id_to_count$count_in_train, decreasing = T), ]
+  
+  # get top 1 in training
+  train_max_id <- train_df_prop_id_to_count[1, ]$object.id
+  
+  # Get test data
+  test_prop_stats <- frequency_of_object_in_test_data(test_path)
+  test_prop_id_to_count <- test_prop_stats[[2]]
+  test_df_prop_id_to_count <- data.frame(object.id = names(test_prop_id_to_count), count_in_train = as.integer(test_prop_id_to_count))
+  freq_in_test <- test_df_prop_id_to_count[test_df_prop_id_to_count$object.id == train_max_id, ]$count_in_train
+  
+  expected_acc_in_test <- (freq_in_test/N * 100)
+  print(paste("Max id: ", train_max_id))
+  print(paste("freq_in_test:", freq_in_test))
+  print(paste("Expected acc:", expected_acc_in_test))
+  return(expected_acc_in_test)
+}
+
+
+naiveAcc1P703 <- get_naive_model_perf("data/np/triples_processed/P703/train.jsonl", "data/np/triples_processed/P703/test.jsonl", 1934)
+
+naiveAcc1rP703 <- get_naive_model_perf("data/np/triples_processed/rP703/train.jsonl", "data/np/triples_processed/rP703/test.jsonl", 500)
+
+```
+
+Le premier correspond à Aspergiluss Niger et le deuxième au composé Atranorin
+je pense qu'il serq intéressant de montrer à quel point ces modèles sont meilleurs que plusieurs optimisation testés ...
+
+Et là on va simplement chercher à voir si on a des modèle qui font juste mieux que ça en termes d'Acc@1 ...
+```{r}
+print("P703 en pourcentage: ")
+acc.opti %>% filter(accType == "Acc@1", property == "P703", acc > naiveAcc1P703) %>% nrow() / nrow(acc.opti) * 100
+
+acc.opti %>% filter(accType == "Acc@1", property == "P703", acc > naiveAcc1P703) %>% DT::datatable()
+
+print("rP703 en pourcentage: ") 
+acc.opti %>% filter(accType == "Acc@1", property == "rP703", acc > naiveAcc1rP703) %>% nrow() / nrow(acc.opti) * 100
+acc.opti %>% filter(accType == "Acc@1", property == "rP703", acc > naiveAcc1rP703) %>% DT::datatable()
+
+```
+
+
+
+
+

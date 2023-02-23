@@ -1,0 +1,10 @@
+**/data/**
+**.html
+**/.Rhistory
+**/.RData
+**/output/**
+**/save/**
+**.csv
+**.png
+**.tsv
+

@@ -1,0 +1,67 @@
+
+
+#1: Extract all Accepted Taxons
+## File taxon-ids-names.csv
+
+DEFINE input:inference "schema-inference-rules"
+
+SELECT distinct (STRAFTER(str(?g), "https://abroad/") as ?TAX_SOURCE) ?Accepted_ID ?rank ?name 
+FROM NAMED <https://abroad/gbif-taxonomy>
+FROM NAMED <https://abroad/mycobank-taxonomy>
+WHERE
+{
+  GRAPH ?g {
+    ?taxa a abroad:AcceptedTaxon ;
+          dwc:taxonID ?Accepted_ID ;
+          dwc:taxonRank ?rank ;
+         rdfs:label ?name .
+  }
+}
+
+
+
+
+
+#2: Extract all relations Accepted-Taxon fron Mycobank <--> PubChem compound: 
+## File data/taxon-np-list.csv
+DEFINE input:inference "schema-inference-rules"
+
+
+SELECT (STRAFTER(str(?g), "https://abroad/") as ?TAX_SOURCE) ?rank ?Accepted_ID ?cpd_related_taxa_ID (STRAFTER(str(?NP), "http://rdf.ncbi.nlm.nih.gov/pubchem/compound/CID") as ?pubchemId) ?ref ?y
+WHERE
+{
+
+	# On récupère, par graphe de ressource taxonomique, l'ensemble des Accepted Taxons
+	{
+		SELECT ?g ?taxa ?rank
+		FROM NAMED <https://abroad/gbif-taxonomy>
+		FROM NAMED <https://abroad/mycobank-taxonomy>
+		WHERE
+		{
+			GRAPH ?g {
+			?taxa a abroad:AcceptedTaxon ;
+				dwc:taxonRank ?rank .
+			}
+		}
+	}
+	
+	# Selection de l'identifiant de l'AcceptedTaxon
+	?taxa dwc:taxonID ?Accepted_ID .
+	
+	# Traverser (si besoin) le lien vers un sysnonyme. Comme ça, on garde la référence de l'entité (Syn. or Accepted) qui est explicitement liée au composé
+	?taxa abroad:hasSynonymTaxon? ?cpd_related_taxa .
+	
+	# On récupère son identifiant
+	?cpd_related_taxa dwc:taxonID ?cpd_related_taxa_ID .
+	
+	# On récupère le composé associé
+	?cpd_related_taxa abroad:taxonProduces ?NP .
+	
+	# On récupère la référence bibliographique
+	?Nary_relation sio:SIO_000628 ?cpd_related_taxa, ?NP ;
+		sio:SIO_000253 ?ref .
+	
+	# On cherche si le composé est associé à une activité antibiotique
+	BIND( exists{ ?NP obo:RO_0000087 ?roleindividual .
+		?roleindividual rdf:type chebi:33281 . } AS ?y)
+}

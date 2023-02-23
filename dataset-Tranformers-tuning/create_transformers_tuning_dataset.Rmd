@@ -1,0 +1,346 @@
+---
+title: "create-tranformers-tuning-dataset"
+author: "Maxime Delmas"
+date: "2022-11-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+```
+
+## Requête 1: Extracttion des relations fungi ("species") - PubChen ID avec le nombre de références supportant chacunes de ces associations.
+fungi2pubchen.csv
+
+```{sql}
+DEFINE input:inference "schema-inference-rules"
+
+select ?fungi_id (STRAFTER(STR(?compound), "http://rdf.ncbi.nlm.nih.gov/pubchem/compound/CID")as ?pubchem_id) ?nb_ref
+FROM <https://abroad/mycobank-taxonomy>
+FROM <https://abroad/species2pubchem>
+FROM <https://abroad/pubchem/compound>
+FROM <https://abroad/chebi>
+WHERE
+{
+	{
+		SELECT ?assos (count(distinct ?ref) as ?nb_ref)
+		WHERE
+		{
+			?assos sio:SIO_000628 ?fungi, ?compound ;
+				sio:SIO_000253 ?ref	
+			
+		}
+		GROUP BY ?assos
+	}
+	?assos sio:SIO_000628 ?fungi, ?compound .
+
+	?fungi a dwc:Taxon ;
+		dwc:taxonRank "species" ;
+		dwc:taxonID ?fungi_id .
+
+	?compound a chebi:23367 .
+}
+```
+
+## Reauête 2: Extraire les noms, et noms des familles des composés
+ATTENTION: CERTAIN PEUVENT ETRE DES SYN
+-file: fungi_nomenclature.csv
+(Plus facile sans inférence pour la transitivité)
+```{sql}
+select distinct ?fungi_id ?fungi_name ?family_name
+FROM <https://abroad/mycobank-taxonomy>
+WHERE
+{
+	?fungi dwc:taxonRank "species" ;
+		dwc:taxonID ?fungi_id ;
+		rdfs:label ?fungi_name .
+
+?fungi abroad:isSynonymTaxonOf/abroad:isChildTaxonOf+|abroad:isChildTaxonOf+ ?ancestor .
+
+	?ancestor dwc:taxonRank "family" ;
+		rdfs:label ?family_name .
+}
+
+```
+
+## Requête 3: Extraction de tous les conposés produit par des fungi ("species") ainsi aue leur activité antibio (0/1)
+-file: compound_activity.csv
+```{sql}
+
+DEFINE input:inference "schema-inference-rules"
+
+select distinct (STRAFTER(STR(?compound), "http://rdf.ncbi.nlm.nih.gov/pubchem/compound/CID")as ?pubchem_id)  ?y
+FROM <https://abroad/chebi>
+FROM <https://abroad/mycobank-taxonomy>
+FROM <https://abroad/species2pubchem>
+FROM <https://abroad/pubchem/compound>
+where
+{
+?fungi a dwc:Taxon ;
+	dwc:taxonRank "species" ;
+	abroad:taxonProduces ?compound .
+
+?compound rdf:type ?chebi .
+
+?chebi rdfs:subClassOf [ a owl:Restriction ;
+		owl:onProperty obo:RO_0000087 ;
+		owl:someValuesFrom ?role ] ;
+	
+	<http://www.geneontology.org/formats/oboInOwl#inSubset> <http://purl.obolibrary.org/obo/chebi#3_STAR>
+	
+BIND ( exists{ ?role rdfs:subClassOf* chebi:33281 } AS ?y)
+}
+
+```
+
+Requête 4: list of all compounds:
+`
+```{sql}
+
+DEFINE input:inference "schema-inference-rules"
+
+select distinct (STRAFTER(STR(?compound), "http://rdf.ncbi.nlm.nih.gov/pubchem/compound/CID")as ?pubchem_id)
+FROM <https://abroad/mycobank-taxonomy>
+FROM <https://abroad/species2pubchem>
+FROM <https://abroad/pubchem/compound>
+where
+{
+?fungi a dwc:Taxon ;
+	dwc:taxonRank "species" ;
+	abroad:taxonProduces ?compound .
+}
+```
+
+### Creating the dataset
+
+1) get fungi - compound associations
+```{r}
+
+# data for fungi - pubchem
+fungi_pubchem <- read_csv("data/fungi2pubchen.csv")
+
+# Some fungi don't have annotated family or genus, so we need to check on that first.
+nomenclature_data <- read_csv("data/fungi_nomenclature.csv")
+
+# keep fungi for which precise taxonomic info is available.
+fungi_pubchem <- fungi_pubchem %>% left_join(nomenclature_data, by = 'fungi_id')
+fungi_pubchem <- fungi_pubchem[! is.na(fungi_pubchem$family_name), ]
+
+# data for pubchem to antibioactivity
+pubchem_antibio_activity <- read_csv("data/compound_activity.csv")
+
+# Warning: if a compound has differents roles it may have a line yith no activity and an other with activity, so fusion by summing to see if it has at least one activity
+pubchem_antibio_activity <- pubchem_antibio_activity %>% group_by(pubchem_id) %>% summarise(y = sum(y))
+
+# merge
+fungi_pubchem <- fungi_pubchem %>% left_join(pubchem_antibio_activity, by='pubchem_id')
+
+# for compounds we don't have information on roles from chebi, set y = -1
+fungi_pubchem[is.na(fungi_pubchem$y), ]$y <- -1
+
+```
+
+
+# Extract the first part of the "producing-positive" set: Fungi produce chemical with antibiotic activities
+```{r}
+
+# extract positives triplets: fungi - pubchem - antibioactiviy
+positives_fungi_pubchem <- fungi_pubchem[(fungi_pubchem$y == 1), ]
+
+# order by nb_ref
+positives_fungi_pubchem <- positives_fungi_pubchem[order(positives_fungi_pubchem$nb_ref, decreasing = T), ]
+
+# add number of distinct fungi on table ordered by decreaing nb_ref:
+v_Fungi_set_size <- vector(mode="numeric", length = nrow(positives_fungi_pubchem))
+for(i in 1:nrow(positives_fungi_pubchem)) {
+    v_Fungi_set_size[i] <- length(unique(positives_fungi_pubchem[1:i, ]$fungi_id))
+}
+positives_fungi_pubchem$Fungi_set_size <- v_Fungi_set_size
+
+
+# extract data until have n differents species:
+n <- 100
+min_index <- max(which(positives_fungi_pubchem$Fungi_set_size == n))
+selected_postives_rows_fungi_pubchem <- positives_fungi_pubchem[1:min_index, ]
+```
+
+
+# Extract the second part of the "producing-positive" set: Fungi produce chemical with NO antibiotic activities
+
+```{r}
+
+# get the list of the 100 fungi previously extracted
+fungi_list <- unique(selected_postives_rows_fungi_pubchem$fungi_id)
+
+# extract negative triplets: fungi produce - NO antibiotic activity
+negatives_fungi_pubchem <- fungi_pubchem[(fungi_pubchem$y == 0), ]
+negatives_fungi_pubchem <- negatives_fungi_pubchem[order(negatives_fungi_pubchem$nb_ref, decreasing = T), ]
+
+# keep only lines involving the selected list of fungi
+negatives_fungi_pubchem <- negatives_fungi_pubchem[negatives_fungi_pubchem$fungi_id %in% fungi_list, ]
+
+# Extract the same number of lines as in the positives
+selected_negatives_rows_fungi_pubchem <- negatives_fungi_pubchem[1:nrow(selected_postives_rows_fungi_pubchem), ]
+```
+
+## merge the both 
+
+```{r}
+
+dataset_fungi_produce <- rbind((selected_postives_rows_fungi_pubchem %>% select(-Fungi_set_size)), selected_negatives_rows_fungi_pubchem)
+
+```
+
+Attention, comme on a sélectionné les composés depuis les positive, il n'est pas garanti que les n champignons du set positif (produisant un cpd avec antibio act.) soit référencés comme produisant un composé qui n'a pas d'activité... Donc certains Fungi peuvent être unique au set: Fungi-produce-chemWithAct
+
+### First balance checking
+
+```{r}
+data_dist_fungi_in_dataset <- dataset_fungi_produce %>% group_by(fungi_id) %>% summarise(n = n())
+ggplot(data_dist_fungi_in_dataset, aes(x = n)) + geom_histogram(binwidth = 1) + theme_classic() + scale_x_continuous(breaks = seq(1, max(data_dist_fungi_in_dataset$n), 1))
+```
+
+
+```{r}
+data_dist_fungi_in_dataset2 <- dataset_fungi_produce %>% group_by(pubchem_id) %>% summarise(n = n())
+ggplot(data_dist_fungi_in_dataset2, aes(x = n)) + geom_histogram(binwidth = 1) + theme_classic() + scale_x_continuous(breaks = seq(1, max(data_dist_fungi_in_dataset2$n), 1))
+```
+
+La distribution semble OK !
+
+
+2) Preparing negatives pairs:
+
+On cherche deja à récupéré toutes les paires connues d'un Fungi qui produirait un composé.
+En connaissant la famille du Fungi, cela nous permet de créer des paires Fungi-family - produce Chem
+
+```{r}
+# Create a table: "Family X is able to produce compound Y which has antibio activity"
+families_pubchem_antibiotic_act <- fungi_pubchem %>% select(family_name, pubchem_id, y) %>% distinct() %>% mutate(ID = paste0(family_name, pubchem_id))
+```
+
+# Create possibles negatives pairs:
+
+
+### Première partie du dataset: ne produit pas & act anti
+```{r}
+# Create all combinations
+all_cbn_pos <- expand.grid(unique(selected_postives_rows_fungi_pubchem$fungi_id), unique(selected_postives_rows_fungi_pubchem$pubchem_id))
+colnames(all_cbn_pos) <- c("fungi_id", "pubchem_id")
+
+# add family informations of combinations and remove duplicates
+all_cbn_pos <- all_cbn_pos %>% left_join((selected_postives_rows_fungi_pubchem %>% select(fungi_id, fungi_name, family_name) %>% distinct()), by = 'fungi_id') %>% mutate(ID = paste0(family_name, pubchem_id))
+
+# remove combibations where the family is already knowm to produce the compound.
+all_cbn_pos <- all_cbn_pos[! all_cbn_pos$ID %in% families_pubchem_antibiotic_act$ID, ]
+
+# on selectionne random autant de negative pairs aue de positives
+sampled_all_cbn_pos <- all_cbn_pos %>% sample_n(nrow(selected_postives_rows_fungi_pubchem))
+sampled_all_cbn_pos$y <- 1
+sampled_all_cbn_pos$nb_ref <- -1
+```
+
+
+
+### seconde partie du dataset: ne produit pas & NO act anti
+```{r}
+# Create all combinations
+all_cbn_neg <- expand.grid(unique(selected_negatives_rows_fungi_pubchem$fungi_id), unique(selected_negatives_rows_fungi_pubchem$pubchem_id))
+colnames(all_cbn_neg) <- c("fungi_id", "pubchem_id")
+
+# add family informations of combinations and remove duplicates
+all_cbn_neg <- all_cbn_neg %>% left_join((selected_negatives_rows_fungi_pubchem %>% select(fungi_id, fungi_name, family_name) %>% distinct()), by = 'fungi_id') %>% mutate(ID = paste0(family_name, pubchem_id))
+
+# remove combibations where the family is already knowm to produce the compound.
+all_cbn_neg <- all_cbn_neg[! all_cbn_neg$ID %in% families_pubchem_antibiotic_act$ID, ]
+
+# on selectionne random autant de negative pairs aue de positives
+sampled_all_cbn_neg <- all_cbn_neg %>% sample_n(nrow(selected_postives_rows_fungi_pubchem))
+sampled_all_cbn_neg$y <- 0
+sampled_all_cbn_neg$nb_ref <- -1
+```
+
+
+## merge the both 
+
+```{r}
+dataset_fungi_not_produce <- rbind((sampled_all_cbn_pos %>% select(fungi_id, pubchem_id, nb_ref, fungi_name, family_name, y)), (sampled_all_cbn_neg %>% select(fungi_id, pubchem_id, nb_ref, fungi_name, family_name, y)))
+```
+
+
+### Second balance checking
+```{r}
+data_dist_fungi_in_dataset <- dataset_fungi_not_produce %>% group_by(fungi_id) %>% summarise(n = n())
+ggplot(data_dist_fungi_in_dataset, aes(x = n)) + geom_histogram(binwidth = 1) + theme_classic() + scale_x_continuous(breaks = seq(1, max(data_dist_fungi_in_dataset$n), 1))
+```
+
+
+```{r}
+data_dist_fungi_in_dataset2 <- dataset_fungi_not_produce %>% group_by(pubchem_id) %>% summarise(n = n())
+ggplot(data_dist_fungi_in_dataset2, aes(x = n)) + geom_histogram(binwidth = 1) + theme_classic() + scale_x_continuous(breaks = seq(1, max(data_dist_fungi_in_dataset2$n), 1))
+```
+# FINAL dataset
+
+```{r}
+dataset <- rbind(dataset_fungi_produce, dataset_fungi_not_produce)
+```
+
+
+
+### Second balance checking
+```{r}
+data_dist_fungi_in_dataset <- dataset[dataset$nb_ref == -1, ] %>% group_by(fungi_id) %>% summarise(n = n())
+ggplot(data_dist_fungi_in_dataset, aes(x = n)) + geom_histogram(binwidth = 1) + theme_classic() + scale_x_continuous(breaks = seq(1, max(data_dist_fungi_in_dataset$n), 1))
+```
+
+
+```{r}
+data_dist_fungi_in_dataset2 <- dataset[dataset$nb_ref == -1, ]  %>% group_by(pubchem_id) %>% summarise(n = n())
+ggplot(data_dist_fungi_in_dataset2, aes(x = n)) + geom_histogram(binwidth = 1) + theme_classic() + scale_x_continuous(breaks = seq(1, max(data_dist_fungi_in_dataset2$n), 1))
+```
+
+
+# add chenmical nane
+
+```{r}
+chem_name <- read_tsv("data/pubchem_names.tsv", col_names = c("pubchem_id", "chem_name"))
+dataset <- dataset %>% left_join(chem_name, by = 'pubchem_id')
+
+write.table(dataset %>% select(fungi_id, fungi_name, family_name, pubchem_id, chem_name, nb_ref, y), sep = '\t', file = "data/dataset.tsv", row.names = FALSE)
+```
+
+## test prompt bias
+
+```{r}
+# re-read dataset
+d <- read_tsv("~/Documents/ABRoad/data/dataset-Tranformers-tuning/data/dataset.tsv")
+
+# Count numner of different families by compounds and producing status and family naée
+test <- d %>% mutate(produce = nb_ref > 0) %>% group_by(pubchem_id, produce, family_name) %>% summarise(n = n())
+
+# keep only compounds with at least two distinct fungi associated for the "produce" nor "not-produce" examples
+test <- test %>% group_by(pubchem_id, produce) %>% mutate(l = sum(n)) %>% filter(l > 1)
+
+# Calcul des proba de chaque familles pour les champignons associés au composé
+test <- test %>% mutate(p = n / l)
+
+# Calcul de l'entropie. On souhaite savoir si l'incertitude relative à la famille derrière un fungi associé à un cpd est inférieure dans les exemples positifs (on suppose que globalement, ils sont souvent de la même famille) par rapport aux exemples négatifs (où l'on s'attend à plus de var.)
+test <- test %>% group_by(pubchem_id, produce) %>% summarise(E = -sum((p * log2(p))))
+
+ggplot(test, aes(x = produce, y = E)) + geom_boxplot()
+
+
+
+```
+
+Si 
+
+
+
+
+
+
+
+
+
+
