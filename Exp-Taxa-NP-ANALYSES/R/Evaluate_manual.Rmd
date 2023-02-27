@@ -152,7 +152,7 @@ read_test_data <- function(path){
     # On ne considère pas les synonymes car ils ne sont pas envoyé au modèle.
     subject.label <- json.data[["sub_label"]]
     
-    object.labels <- c(json.data[["obj_label"]], unlist(json.data[["obj_aliases"]]))
+    object.labels <- c(json.data[["obj_labels"]], unlist(json.data[["obj_aliases"]]))
     
     LCP <- longest_common_prefix(x = subject.label, object.labels)
     
@@ -166,7 +166,7 @@ read_test_data <- function(path){
 
 
 
-frequency_of_object_in_test_data <- function(path){
+frequency_of_object_in_train_data <- function(path){
   
   name_normalise <- function(name){
     
@@ -227,7 +227,7 @@ frequency_of_object_in_test_data <- function(path){
 bias_from_training_dataset <- function(path_to_train, l_train, bif.df, ref, top=10){
   
   prediction_data <- bif.df[bif.df$ref == ref, ]
-  prop_stats <- frequency_of_object_in_test_data(path_to_train)
+  prop_stats <- frequency_of_object_in_train_data(path_to_train)
   prop_name_to_id <- prop_stats[[1]]
   prop_id_to_count <- prop_stats[[2]]
   df_prop_id_to_count <- data.frame(object.id = names(prop_id_to_count), count_in_train = as.integer(prop_id_to_count))

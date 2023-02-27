@@ -9,6 +9,7 @@ editor_options:
 
 ```{r setup, include=FALSE}
 library(tidyverse)
+library(jsonlite)
 ```
 
 
@@ -246,22 +247,31 @@ Pour continuer la comparaison avec les mdèles, j'aimerai tester a quel point un
 ```{r}
 
 get_naive_model_perf <- function(train_path, test_path, N){
+  
+  get_order_df_freq <- function(path){
+    prop_stats <- frequency_of_object_in_test_data(path)
+    prop_id_to_count <- prop_stats[[2]]
+  
+    df_prop_id_to_count <- data.frame(object.id = names(prop_id_to_count), count_in_train = as.integer(prop_id_to_count))
+  
+    # Ordering by counts
+    df_prop_id_to_count <- df_prop_id_to_count[order(df_prop_id_to_count$count_in_train, decreasing = T), ]
+    print(" < ====================== >")
+    print(paste("path: ", path))
+    print(head(df_prop_id_to_count))
+    print(" < ====================== >")
+    return(df_prop_id_to_count)
+  }
+  
   # get training data stats
-  train_prop_stats <- frequency_of_object_in_test_data(train_path)
-  train_prop_id_to_count <- train_prop_stats[[2]]
-  
-  train_df_prop_id_to_count <- data.frame(object.id = names(train_prop_id_to_count), count_in_train = as.integer(train_prop_id_to_count))
-  
-  # Ordering by counts
-  train_df_prop_id_to_count <- train_df_prop_id_to_count[order(train_df_prop_id_to_count$count_in_train, decreasing = T), ]
+  train_df_prop_id_to_count <- get_order_df_freq(train_path)
   
   # get top 1 in training
   train_max_id <- train_df_prop_id_to_count[1, ]$object.id
   
   # Get test data
-  test_prop_stats <- frequency_of_object_in_test_data(test_path)
-  test_prop_id_to_count <- test_prop_stats[[2]]
-  test_df_prop_id_to_count <- data.frame(object.id = names(test_prop_id_to_count), count_in_train = as.integer(test_prop_id_to_count))
+  test_df_prop_id_to_count <- get_order_df_freq(test_path)
+  
   freq_in_test <- test_df_prop_id_to_count[test_df_prop_id_to_count$object.id == train_max_id, ]$count_in_train
   
   expected_acc_in_test <- (freq_in_test/N * 100)
@@ -273,10 +283,17 @@ get_naive_model_perf <- function(train_path, test_path, N){
 
 
 naiveAcc1P703 <- get_naive_model_perf("data/np/triples_processed/P703/train.jsonl", "data/np/triples_processed/P703/test.jsonl", 1934)
-
 naiveAcc1rP703 <- get_naive_model_perf("data/np/triples_processed/rP703/train.jsonl", "data/np/triples_processed/rP703/test.jsonl", 500)
+```
+
+# Juste pour tester que l'àchenatillonage est bon, on va vérifier que c'est les même ids qui reviennent dans le test-set.
+
+```{r}
+
 
 ```
+
+
 
 Le premier correspond à Aspergiluss Niger et le deuxième au composé Atranorin
 je pense qu'il serq intéressant de montrer à quel point ces modèles sont meilleurs que plusieurs optimisation testés ...

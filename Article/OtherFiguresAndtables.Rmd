@@ -1,0 +1,529 @@
+---
+title: "F2"
+author: "Maxime Delmas"
+date: "2023-02-27"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(effsize)
+library(ggpubr)
+library(grid)
+```
+
+## functions
+
+```{r}
+
+read_predictions <- function(path){
+  json.str <- readLines(path, ok = T, warn = F)
+  json.data <- fromJSON(json.str[1])
+  return(json.data)
+}
+
+# From the json data, creates the data.frame, with columns: subject.id, preds.label, preds.probas, rank
+extract_prediction_proba_pairs <- function(json.data){
+  
+  # Get length
+  N <- length(json.data[["result"]])
+  M <- length(json.data[["result"]][[1]][["preds"]])
+  
+  # inti the dataset
+  dataset <- data.frame(subject.id = vector("character", N * M), preds.label = vector("character", N * M), preds.probas = vector("numeric", N * M), preds.rank = rep(c(1:M), N))
+  
+  for(i in 1:N) {
+    
+    # get the data and fill to the corresponding indexes.
+    result <- json.data[["result"]][[i]]
+    
+    splited.uuid <- strsplit(result[["uuid"]], "-")[[1]]
+    subject.id <- splited.uuid[1]
+    
+    # preds
+    preds <- unlist(result[["preds"]])
+    preds.label <- preds[seq(1, length(preds), 2)]
+    preds.probas <- preds[seq(2, length(preds), 2)]
+    
+    is.correct <- rep(FALSE, M)
+    if(length(result[["corrected_preds"]]) > 0) {
+      # correct preds
+      correct.preds <- unlist(result[["corrected_preds"]])
+      correct.preds.label <- correct.preds[seq(1, length(correct.preds), 2)]
+      correct.preds.rank <- as.numeric(correct.preds[seq(2, length(correct.preds), 2)])
+      
+      # test if preds in correct preds
+      is.correct <- preds.label %in% correct.preds.label
+    }
+    
+    dataset[(M*(i - 1) + 1):(M * i ), "subject.id"] <- subject.id
+    dataset[(M*(i - 1) + 1):(M * i ), "preds.label"] <- preds.label
+    dataset[(M*(i - 1) + 1):(M * i ), "preds.probas"] <- as.numeric(preds.probas)
+    dataset[(M*(i - 1) + 1):(M * i ), "is.correct"] <- is.correct
+    
+  }
+  return(dataset)
+}
+
+
+
+create_plot <- function(big.df, ref){
+
+      sub.df <- big.df[big.df$ref == ref, ]
+    data_for_plot <- sub.df %>% mutate(masked.rank.bin = cut(rank.in.masked, breaks = c(-1, 1, 2, 5, 10, 20, 50), labels = c('exclusive', "top1", "top [2-5[", "top [5-10[", "[10-20[", "[20-50["), include.lowest = T, right = F))
+    data_for_plot <- data_for_plot %>% group_by(ref, preds.rank, masked.rank.bin) %>% summarise(n = n())
+    data_for_plot <- data_for_plot %>% group_by(ref, preds.rank) %>% mutate(prop = (n/sum(n)) * 100)
+    data_for_plot$masked.rank.bin <- factor(data_for_plot$masked.rank.bin, levels = c('exclusive', "top1", "top [2-5[", "top [5-10[", "[10-20[", "[20-50["))
+    
+    p <- data_for_plot %>% ggplot(aes(x = preds.rank, y = prop, fill = masked.rank.bin)) +
+      geom_bar(stat="identity") +
+      theme_classic() +
+      scale_fill_discrete(drop=FALSE) +
+      theme(axis.text = element_text(size = 20), text = element_text(size = 15)) +
+      xlab("") + 
+      ylab("")
+      # ggtitle(paste("property= ", ref)) +
+    return(p)
+
+}
+
+
+
+longest_common_prefix <- function(x, y) {
+    # Remove punctation or digit characters (if chemical for instance):
+    process_str <- function(x) {
+      tolower(gsub('[[:punct:][:digit:]]+','',x))
+    }
+    x.processed <- process_str(x)
+    y.processed <- sapply(y, FUN = process_str, simplify = T, USE.NAMES = F)
+    
+    longest <- 0
+    # cut x by space
+    for (ind.x in strsplit(x.processed, " ")[[1]]) {
+      # print(ind.x)
+      # also test on all y cuted by space
+      for(ind.y in unlist(sapply(y.processed, FUN = function(x){strsplit(x, " ")}, simplify = T, USE.NAMES = F)) ){
+        
+        # test if longest prefix is
+        l <- nchar(longestCommonPrefix(c(ind.x, ind.y)))
+        
+        if(l > longest){
+          longest <- l
+        }
+      }
+    }
+    return(longest)
+}
+
+read_test_data <- function(path){
+  
+  lines <- readLines(path, ok = T, warn = F)
+  
+  N <- length(lines)
+  
+  out <- data.frame("subject.id" = vector("character", N), "subject.label" = vector("character", N), "object.labels" = vector("character", N), LCP = vector("numeric", N))
+
+  for(index in 1:N){
+    
+    line <- lines[index]
+    
+    json.data <- fromJSON(line)
+    
+    subject.id <- json.data[["sub_uri"]]
+    
+    # On ne considère pas les synonymes car ils ne sont pas envoyé au modèle.
+    subject.label <- json.data[["sub_label"]]
+    
+    object.labels <- c(json.data[["obj_labels"]], unlist(json.data[["obj_aliases"]]))
+    
+    LCP <- longest_common_prefix(x = subject.label, object.labels)
+    
+    out[index, "subject.id"] <- subject.id
+    out[index, "subject.label"] <- subject.label
+    out[index, "object.labels"] <- paste(object.labels, collapse="; ")
+    out[index, "LCP"] <- LCP
+  }
+  return(out)
+}
+
+frequency_of_object_in_train_data <- function(path){
+  
+  name_normalise <- function(name){
+    
+    # lower
+    name <- tolower(name)
+    
+    # remove punctuation and space
+    name <- gsub("[[:punct:]]", "", name)
+    
+    # remove articles
+    name <- gsub("\\b(a|an|the)\\b", "", name, perl = T)
+    
+    # fix white spaces
+    name_ <- str_split(name, "\\s+", simplify = T)
+    name <- paste(name_[name_ != ""], collapse = " ")
+    return(name)
+  }
+  
+  lines <- readLines(path, ok = T, warn = F)
+  
+  N <- length(lines)
+  
+  # dict to map names of predictions to ids
+  names_to_id <- list()
+  id_to_count <-  list()
+  
+  for(index in 1:N){
+    
+    line <- lines[index]
+    
+    json.data <- fromJSON(line)
+    
+    objects.uris <- json.data[["obj_uris"]]
+    for(i in 1:length(objects.uris)){
+        
+      uri <- objects.uris[i]
+        
+      # first time we meet this id ?
+        if (! uri %in% names_to_id) {
+            
+            for (name  in c(json.data[["obj_labels"]][i], unlist(json.data[["obj_aliases"]][i]) )) {
+              names_to_id[[name_normalise(name)]] <- uri
+            }
+            id_to_count[[uri]] <- 1
+        }
+
+        # not the first time, increment count
+        else{
+            id_to_count[[uri]] <- id_to_count[[uri]] + 1
+        }
+    }
+  }
+  return(list(names_to_id, id_to_count))
+  
+}
+
+
+
+bias_from_training_dataset <- function(path_to_train, l_train, bif.df, ref, top=10){
+  
+  prediction_data <- bif.df[bif.df$ref == ref, ]
+  prop_stats <- frequency_of_object_in_train_data(path_to_train)
+  prop_name_to_id <- prop_stats[[1]]
+  prop_id_to_count <- prop_stats[[2]]
+  df_prop_id_to_count <- data.frame(object.id = names(prop_id_to_count), count_in_train = as.integer(prop_id_to_count))
+  # On fait le top par rapport aux rank et nonpas par les object.ids, comme ça, si jamis plusieurs objets ont la fréquence atteinte au top choisi, alors tous sont gardés.
+  temp_df <- data_frame(count_in_train = unique(df_prop_id_to_count$count_in_train))
+  temp_df <- temp_df[order(temp_df$count_in_train, decreasing = T), ]
+  temp_df$index <- 1:nrow(temp_df)
+  temp_df$isintop <- temp_df$index <= top
+
+  df_prop_id_to_count <- df_prop_id_to_count %>% left_join((temp_df %>% select(count_in_train, isintop)), by = "count_in_train")
+  
+  df_prop_name_to_id <- data.frame(preds.label = names(prop_name_to_id),  object.id = as.character(prop_name_to_id))
+ 
+  prediction_data <- prediction_data %>% left_join(df_prop_name_to_id, by = "preds.label") %>% left_join(df_prop_id_to_count, by = "object.id")
+  prediction_data[is.na(prediction_data$isintop), ]$isintop <- FALSE
+  
+  data_for_plot <- prediction_data %>% group_by(preds.rank, isintop) %>% summarise(n = n())
+  data_for_plot <- data_for_plot %>% group_by(preds.rank) %>% mutate(prop = (n/sum(n)) * 100)
+  
+  p <- data_for_plot %>% ggplot(aes(x = preds.rank, y = prop, fill = isintop)) +
+  geom_bar(stat="identity") +
+  theme_classic() +
+  scale_fill_discrete(drop=FALSE) +
+  theme(axis.text = element_text(size = 20), text = element_text(size = 15)) +
+  xlab("") + 
+  ylab("")
+  # ggtitle(paste("property= ", ref))
+  return(list(prediction_data, p))
+}
+
+
+```
+
+
+# Best manual-prompting results
+```{r}
+
+manual_model_ref <- c("P703-manual*", "rP703-manual*")
+
+manual_model_res <- c("../Exp-Taxa-NP-ANALYSES/output/np/manual/PubMedBERT/manual2/confidence/none/P703.json",
+               "../Exp-Taxa-NP-ANALYSES/output/np/manual/PubMedBERT-full/manual1/order/confidence/rP703.json")
+
+manual_model_res_masked <- c("../Exp-Taxa-NP-ANALYSES/output/np/manual/PubMedBERT/manual2/confidence/none/MASKED/P703.json",
+                      "../Exp-Taxa-NP-ANALYSES/output/np/manual/PubMedBERT-full/manual1/order/confidence/MASKED/rP703.json")
+
+
+list.of.df <- list()
+
+for(index in 1:2){
+  
+  print("<=====================")
+  print(manual_model_ref[index])
+  p1 <- manual_model_res[index]
+  p2 <- manual_model_res_masked[index]
+  
+  print(paste("- Std. file at: ", p1))
+  print(paste("- Masked. file at: ", p2))
+  
+  std <- extract_prediction_proba_pairs(read_predictions(p1)) %>% distinct()
+  masked <- extract_prediction_proba_pairs(read_predictions(p2)) %>% distinct()
+  
+  masked_for_merging <- (masked %>% select(preds.label, preds.rank))
+  colnames(masked_for_merging) <- c("preds.label", "rank.in.masked")
+  
+  comp <- std %>% left_join(masked_for_merging, by = "preds.label")
+  comp[is.na(comp$rank.in.masked), ]$rank.in.masked <- -1
+  
+  # comp <- compare_std_exp_to_masked(std, masked)
+  
+  # fill with metadata
+  comp$ref <- manual_model_ref[index]
+  
+  list.of.df[[index]] <- comp
+  
+  print("=====================>")
+  
+  index <- index + 1
+}
+          
+manual_big.df <- do.call("rbind", list.of.df)
+
+# remove null predictions (== "") or prediction that are just a number.
+manual_big.df <- manual_big.df[ (manual_big.df$preds.label != "") , ]
+```
+
+
+
+# get results for opti-best model
+
+```{r}
+
+opti_model_ref <- c("P703-opti*", "rP703-opti*")
+
+opti_model_prop <- c("P703.json", "rP703.json")
+
+opti_model_res_dir <- c("../Exp-Taxa-NP-ANALYSES/output/np/opti/PubMedBERT-full/manual1/order/none",
+               "../Exp-Taxa-NP-ANALYSES/output/np/opti/PubMedBERT-full/FS/order/confidence")
+
+seeds <- c("seed0", "seed64")
+```
+P703.json
+rP703.json
+
+MASKED/P703.json
+MASKED/rP703.json
+```{r}
+
+j <- 1
+
+list.of.df <- list()
+
+for(index in 1:2){
+  
+  for(seed in seeds){
+
+    print("<=====================")
+    print(opti_model_ref[index])
+    p1 <- paste(c(opti_model_res_dir[index], seed, opti_model_prop[index]), collapse = '/')
+    p2 <- paste(c(opti_model_res_dir[index], seed, "MASKED", opti_model_prop[index]), collapse = '/')
+    
+    print(paste("- Std. file at: ", p1))
+    print(paste("- Masked. file at: ", p2))
+    
+    std <- extract_prediction_proba_pairs(read_predictions(p1)) %>% distinct()
+    masked <- extract_prediction_proba_pairs(read_predictions(p2)) %>% distinct()
+    
+    masked_for_merging <- (masked %>% select(preds.label, preds.rank))
+    colnames(masked_for_merging) <- c("preds.label", "rank.in.masked")
+    
+    comp <- std %>% left_join(masked_for_merging, by = "preds.label")
+    comp[is.na(comp$rank.in.masked), ]$rank.in.masked <- -1
+    
+    # comp <- compare_std_exp_to_masked(std, masked)
+    
+    # fill with metadata
+    comp$ref <- opti_model_ref[index]
+    comp$seed <- seed
+    
+    list.of.df[[j]] <- comp
+    
+    print("=====================>")
+    
+    j <- j + 1
+  }
+}
+          
+opti_big.df <- do.call("rbind", list.of.df)
+
+# remove null predictions (== "") or prediction that are just a number.
+opti_big.df <- opti_big.df[ (opti_big.df$preds.label != "") , ]
+
+```
+
+
+```{r}
+p1 <- create_plot(manual_big.df, "P703-manual*")
+p2 <- create_plot(manual_big.df, "rP703-manual*")
+p3 <- create_plot(opti_big.df, "P703-opti*")
+p4 <- create_plot(opti_big.df, "rP703-opti*")
+
+```
+
+```{r}
+
+p2 <- p2 + xlab("Prediction ranks")
+p4 <- p4 + xlab("Prediction ranks")
+
+p1 <- p1 + ylab("Proportion of predictions")
+p2 <- p2 + ylab("Proportion of predictions")
+
+full <- ggarrange(p1, p3, p2, p4, 
+                  labels = c("A", "B", "C", "D"),
+                  font.label = list(size = 20, color = "black", face = "bold", family = NULL), 
+                  common.legend = T, 
+                  legend = "right", ncol = 2, nrow = 2)
+```
+
+```{r}
+plot(full)
+```
+
+
+
+* * *
+
+# On calcule les Acc par rapport au leakge.
+
+```{r}
+test_data <- c("../Exp-Taxa-NP-ANALYSES/data/np/triples_processed/P703/test.jsonl", "../Exp-Taxa-NP-ANALYSES/data/np/triples_processed/rP703/test.jsonl")
+```
+
+
+# get the leakage data
+```{r}
+# limite de la taille du prefixed commun
+LCP_limit <- 6
+test_data_P703 <- read_test_data(test_data[1])
+test_data_P703$prop <- "P703"
+
+test_data_rP703 <- read_test_data(test_data[2])
+test_data_rP703$prop <- "rP703"
+
+LCP_for_join <- rbind((test_data_P703 %>% select(subject.id, prop, LCP)), (test_data_rP703 %>% select(subject.id, prop, LCP)))
+```
+
+pour la taille des samples:
+```{r}
+LCP_for_join %>% group_by(prop) %>% summarise(size.leakage.set = n_distinct(subject.id[LCP >= LCP_limit]), size.not.leakage.set = n_distinct(subject.id) - n_distinct(subject.id[LCP >= LCP_limit]) )
+```
+
+- for opti.
+```{r}
+opti_big.df %>% mutate(prop = str_split(ref, "-", simplify = T)[, 1]) %>% 
+  left_join(LCP_for_join, by = c("prop", "subject.id")) %>% 
+  mutate(ObjectLeaked = LCP >= LCP_limit) %>% 
+  group_by(ref, ObjectLeaked, seed) %>%
+  summarise(Acc5 = signif((n_distinct(subject.id[is.correct==T & preds.rank <= 5]) / n_distinct(subject.id)) * 100, 2)) %>%
+  group_by(ref, ObjectLeaked) %>%
+  summarise("Avg.acc@5" = mean(Acc5)) %>%
+  DT::datatable()
+```
+
+- for manual
+```{r}
+
+manual_big.df %>% mutate(prop = str_split(ref, "-", simplify = T)[, 1]) %>% 
+  left_join(LCP_for_join, by = c("prop", "subject.id")) %>% 
+  mutate(ObjectLeaked = LCP >= LCP_limit) %>% 
+  group_by(ref, ObjectLeaked) %>% summarise("Acc@5" = signif((n_distinct(subject.id[is.correct==T & preds.rank <= 5]) / n_distinct(subject.id)) * 100, 2)) %>%
+  DT::datatable()
+```
+
+
+
+* * *
+For manual:
+```{r}
+manual_preds_frequency <- manual_big.df %>% group_by(ref, preds.label) %>% summarise(n = n_distinct(subject.id))
+manual_preds_frequency <- manual_preds_frequency %>% left_join((manual_big.df %>% group_by(ref) %>% summarise(N = n_distinct(subject.id))), by = "ref")
+manual_preds_frequency$freq <- (manual_preds_frequency$n / manual_preds_frequency$N) * 100
+
+manual_correcte_preds_and_freq <- manual_big.df %>% filter(is.correct) %>% left_join((manual_preds_frequency %>% select(-c(n, N))), by = c("ref", "preds.label"))
+
+manual_correcte_preds_and_freq %>% group_by(ref) %>% summarise(median = median(freq),
+                                                        min = min(freq),
+                                                        max = max(freq))
+
+```
+
+
+For opti
+```{r}
+
+opti_preds_frequency <- opti_big.df %>% group_by(ref, preds.label, seed) %>% summarise(n = n_distinct(subject.id))
+opti_preds_frequency <- opti_preds_frequency %>% left_join((opti_big.df %>% group_by(ref, seed) %>% summarise(N = n_distinct(subject.id))), by = "ref")
+opti_preds_frequency$freq <- (opti_preds_frequency$n / opti_preds_frequency$N) * 100
+
+opti_preds_frequency <- opti_preds_frequency %>% group_by(ref, preds.label) %>% summarise(freq = mean(freq))
+
+opti_correcte_preds_and_freq <- opti_big.df %>% filter(is.correct) %>% left_join(opti_preds_frequency, by = c("ref", "preds.label"))
+
+opti_correcte_preds_and_freq %>% group_by(ref) %>% summarise(median = median(freq),
+                                                        min = min(freq),
+                                                        max = max(freq))
+
+
+```
+
+
+
+* * *
+
+
+```{r}
+
+tmp1 <- bias_from_training_dataset("../Exp-Taxa-NP-ANALYSES/data/np/triples_processed/P703/train.jsonl", 1546, manual_big.df, "P703-manual*")
+d1 <- tmp1[[1]]
+p1.2 <- tmp1[[2]]
+
+tmp2 <- bias_from_training_dataset("../Exp-Taxa-NP-ANALYSES/data/np/triples_processed/rP703/train.jsonl", 400, manual_big.df, "rP703-manual*")
+d2<- tmp2[[1]]
+p2.2 <- tmp2[[2]]
+
+tmp3 <- bias_from_training_dataset("../Exp-Taxa-NP-ANALYSES/data/np/triples_processed/P703/train.jsonl", 1546, opti_big.df, "P703-opti*")
+d3 <- tmp3[[1]]
+p3.2 <- tmp3[[2]]
+
+tmp4 <- bias_from_training_dataset("../Exp-Taxa-NP-ANALYSES/data/np/triples_processed/rP703/train.jsonl", 400, opti_big.df, "rP703-opti*")
+d4 <- tmp4[[1]]
+p4.2 <- tmp4[[2]]
+
+```
+
+```{r}
+
+p2.2 <- p2.2 + xlab("Prediction ranks")
+p4.2 <- p4.2 + xlab("Prediction ranks")
+
+p1.2 <- p1.2 + ylab("Proportion of predictions")
+p2.2 <- p2.2 + ylab("Proportion of predictions")
+
+full2 <- ggarrange(p1.2, p3.2, p2.2, p4.2, 
+                  labels = c("A", "B", "C", "D"),
+                  font.label = list(size = 20, color = "black", face = "bold", family = NULL), 
+                  common.legend = T, 
+                  legend = "right", ncol = 2, nrow = 2)
+
+```
+
+```{r}
+plot(full2)
+```
+
+
+J'a aussi exporter les tables ;)
