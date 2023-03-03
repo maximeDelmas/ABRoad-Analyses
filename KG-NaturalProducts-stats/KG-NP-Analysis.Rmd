@@ -5,6 +5,8 @@ date: "2023-01-16"
 output: 
   html_document:
     css: style.css
+editor_options: 
+  chunk_output_type: console
 ---
 
 ```{r}
@@ -15,7 +17,7 @@ library(DT)
 
 # SPARQL: Extract all Accepted Taxons:
 - file: taxon-ids-names.csv
-```{SQL}
+```{SQL eval=FALSE, include=FALSE}
 DEFINE input:inference "schema-inference-rules"
 
 SELECT distinct (STRAFTER(str(?g), "https://abroad/") as ?TAX_SOURCE) ?Accepted_ID ?name 
@@ -34,7 +36,7 @@ WHERE
 
 # SPARQL request: Extract all relations Accepted-Taxon fron Mycobank <--> PubChem compound
 - file: data/taxon-np-list.csv
-```{SQL}
+```{SQL eval=FALSE, include=FALSE}
 
 DEFINE input:inference "schema-inference-rules"
 
