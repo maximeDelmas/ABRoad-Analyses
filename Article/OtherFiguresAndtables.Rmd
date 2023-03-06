@@ -10,6 +10,8 @@ editor_options:
 ```{r setup, include=FALSE}
 library(tidyverse)
 library(ggplot2)
+library(PTXQC)
+library(rjson)
 library(effsize)
 library(ggpubr)
 library(grid)
@@ -208,7 +210,7 @@ frequency_of_object_in_train_data <- function(path){
 
 
 
-bias_from_training_dataset <- function(path_to_train, l_train, bif.df, ref, top=10){
+bias_from_training_dataset <- function(path_to_train, l_train, bif.df, ref, top=5){
   
   prediction_data <- bif.df[bif.df$ref == ref, ]
   prop_stats <- frequency_of_object_in_train_data(path_to_train)
@@ -307,16 +309,16 @@ opti_model_ref <- c("P703-opti*", "rP703-opti*")
 
 opti_model_prop <- c("P703.json", "rP703.json")
 
-opti_model_res_dir <- c("../Exp-Taxa-NP-ANALYSES/output/np/opti/PubMedBERT-full/manual1/order/none",
-               "../Exp-Taxa-NP-ANALYSES/output/np/opti/PubMedBERT-full/FS/order/confidence")
+# opti_model_res_dir <- c("../Exp-Taxa-NP-ANALYSES/output/np/opti/PubMedBERT-full/manual1/order/none", "../Exp-Taxa-NP-ANALYSES/output/np/opti/PubMedBERT-full/FS/order/confidence")
+opti_model_res_dir <- c("../Exp-Taxa-NP-ANALYSES/output/np/opti2/PubMedBERT/manual1/confidence/none", "../Exp-Taxa-NP-ANALYSES/output/np/opti2/PubMedBERT-full/manual1/order/confidence")
 
-seeds <- c("seed0", "seed64")
+# seeds <- c("seed0", "seed64")
+seeds <- c("seed0", "seed64", "seed333", "seed566", "seed999")
 ```
-P703.json
-rP703.json
 
-MASKED/P703.json
-MASKED/rP703.json
+
+
+
 ```{r}
 
 j <- 1
@@ -407,7 +409,7 @@ test_data <- c("../Exp-Taxa-NP-ANALYSES/data/np/triples_processed/P703/test.json
 # get the leakage data
 ```{r}
 # limite de la taille du prefixed commun
-LCP_limit <- 6
+LCP_limit <- 10
 test_data_P703 <- read_test_data(test_data[1])
 test_data_P703$prop <- "P703"
 
@@ -487,19 +489,20 @@ opti_correcte_preds_and_freq %>% group_by(ref) %>% summarise(median = median(fre
 
 ```{r}
 
-tmp1 <- bias_from_training_dataset("../Exp-Taxa-NP-ANALYSES/data/np/triples_processed/P703/train.jsonl", 1546, manual_big.df, "P703-manual*")
+# tmp1 <- bias_from_training_dataset("../Exp-Taxa-NP-ANALYSES/data/np/triples_processed/P703/train.jsonl", 1546, manual_big.df, "P703-manual*")
+tmp1 <- bias_from_training_dataset("../Exp-Taxa-NP-ANALYSES/data/np/triples_processed/P703/big_train.jsonl", 1933, manual_big.df, "P703-manual*")
 d1 <- tmp1[[1]]
 p1.2 <- tmp1[[2]]
 
-tmp2 <- bias_from_training_dataset("../Exp-Taxa-NP-ANALYSES/data/np/triples_processed/rP703/train.jsonl", 400, manual_big.df, "rP703-manual*")
+tmp2 <- bias_from_training_dataset("../Exp-Taxa-NP-ANALYSES/data/np/triples_processed/rP703/big_train.jsonl", 500, manual_big.df, "rP703-manual*")
 d2<- tmp2[[1]]
 p2.2 <- tmp2[[2]]
 
-tmp3 <- bias_from_training_dataset("../Exp-Taxa-NP-ANALYSES/data/np/triples_processed/P703/train.jsonl", 1546, opti_big.df, "P703-opti*")
+tmp3 <- bias_from_training_dataset("../Exp-Taxa-NP-ANALYSES/data/np/triples_processed/P703/big_train.jsonl", 1933, opti_big.df, "P703-opti*")
 d3 <- tmp3[[1]]
 p3.2 <- tmp3[[2]]
 
-tmp4 <- bias_from_training_dataset("../Exp-Taxa-NP-ANALYSES/data/np/triples_processed/rP703/train.jsonl", 400, opti_big.df, "rP703-opti*")
+tmp4 <- bias_from_training_dataset("../Exp-Taxa-NP-ANALYSES/data/np/triples_processed/rP703/big_train.jsonl", 500, opti_big.df, "rP703-opti*")
 d4 <- tmp4[[1]]
 p4.2 <- tmp4[[2]]
 
