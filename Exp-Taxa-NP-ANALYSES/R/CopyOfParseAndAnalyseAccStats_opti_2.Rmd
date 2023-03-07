@@ -77,7 +77,7 @@ parsed_data$prompt <- factor(parsed_data$prompt, levels = c("manual1", "manual2"
 ### On calcule la moyenne sur les 5 seeds.
 ```{r}
 save <- parsed_data
-parsed_data <- parsed_data %>% group_by(model, prompt, init, iter, property, accType) %>% summarise(acc = mean(acc))
+parsed_data <- parsed_data %>% group_by(model, prompt, init, iter, property, accType) %>% summarise(acc = mean(acc), sd = sd(acc))
 ```
 
 

@@ -81,10 +81,10 @@ create_plot <- function(big.df, ref){
     data_for_plot$masked.rank.bin <- factor(data_for_plot$masked.rank.bin, levels = c('exclusive', "top1", "top [2-5[", "top [5-10[", "[10-20[", "[20-50["))
     
     p <- data_for_plot %>% ggplot(aes(x = preds.rank, y = prop, fill = masked.rank.bin)) +
-      geom_bar(stat="identity") +
+      geom_bar(stat="identity", width=1) +
       theme_classic() +
       scale_fill_discrete(drop=FALSE) +
-      theme(axis.text = element_text(size = 20), text = element_text(size = 15)) +
+      theme(axis.text = element_text(size = 20, , colour="black"), text = element_text(size = 15, colour="black")) +
       xlab("") + 
       ylab("")
       # ggtitle(paste("property= ", ref)) +
@@ -139,7 +139,7 @@ read_test_data <- function(path){
     # On ne considère pas les synonymes car ils ne sont pas envoyé au modèle.
     subject.label <- json.data[["sub_label"]]
     
-    object.labels <- c(json.data[["obj_labels"]], unlist(json.data[["obj_aliases"]]))
+    object.labels <- c(json.data[["obj_labels"]], unlist(json.data[["obj_aliases"]])) #
     
     LCP <- longest_common_prefix(x = subject.label, object.labels)
     
@@ -244,6 +244,107 @@ bias_from_training_dataset <- function(path_to_train, l_train, bif.df, ref, top=
   return(list(prediction_data, p))
 }
 
+
+compute_pred_LCP <- function(x, y) {
+    # Remove punctation or digit characters (if chemical for instance):
+    process_str <- function(x) {
+      tolower(gsub('[[:punct:][:digit:]]+','',x))
+    }
+    x.processed <- process_str(x)
+    y.processed <- sapply(y, FUN = process_str, simplify = T, USE.NAMES = F)
+    
+    longest <- 0
+    # cut x by space
+    for (ind.x in strsplit(x.processed, " ")[[1]]) {
+      # print(ind.x)
+      # also test on all y cuted by space
+      for(ind.y in strsplit(y.processed, " ")[[1]]){
+        # test if longest prefix is
+        l <- nchar(longestCommonPrefix(c(ind.x, ind.y)))
+        if(l > longest){
+          longest <- l
+        }
+      }
+    }
+    return(longest)
+  }
+
+
+LCP_permutation_test <- function(preds, subject2labels, nsims){
+  
+  out <- data.frame()
+  
+  preds <- preds %>% mutate(prop = str_split(ref, "-", simplify = T)[, 1])
+  seeds <- unique(preds$seed)
+  refs <- unique(preds$ref)
+  
+  for(r in refs){
+    
+    print(paste("Ref: ", r))
+    
+    for(s in seeds){
+      
+      nge <- 0
+      
+      print(paste("Seed", s))
+      
+      # Déjà, on ne récupère que les predictions correctes:
+      correct.preds <- preds %>% filter(is.correct, ref == r, seed == s)
+      # On met les labels:
+      correct.preds <- correct.preds %>% left_join((subject2labels %>% select(subject.id, subject.label, prop)), by = c("subject.id", "prop"))
+      
+      correct.preds <- correct.preds %>% select(subject.label, preds.label)
+      
+      LCPs <- apply(correct.preds, 1, FUN = function(x){LCP(x[1], x[2])})
+      AVG.LCP <- mean(LCPs)
+      MED.LCP <- median(LCPs)
+      MIN.LCP <- min(LCPs)
+      MAX.LCP <- max(LCPs)
+      
+      for(i in 1:nsims){
+        # print(paste("sim: ", i))
+        correct.preds$subject.label <- sample(correct.preds$subject.label)
+        correct.preds$preds.label <- sample(correct.preds$preds.label)
+        avg.sim.LCP <- mean(apply(correct.preds, 1, FUN = function(x){LCP(x[1], x[2])}))
+        if(avg.sim.LCP > AVG.LCP){
+          nge <- nge + 1
+        }
+      
+      }
+      p.v.monte.c <- (nge + 1) / (nsims + 1)
+      tmp <- data.frame("ref" = r, "seed" = s, "AVG.LCP" = AVG.LCP, "MED.LCP" = MED.LCP, "MIN.LCP" = MIN.LCP, "MAX.LCP" = MAX.LCP, "est.p.v" = p.v.monte.c)
+      out <- rbind(out, tmp)
+    }
+  }
+  return(out)
+}
+
+
+get_table_labels <- function(path){
+  
+  lines <- readLines(path, ok = T, warn = F)
+  
+  N <- length(lines)
+  
+  out <- data.frame("subject.id" = vector("character", N), "subject.label" = vector("character", N))
+
+  for(index in 1:N){
+    
+    line <- lines[index]
+    
+    json.data <- fromJSON(line)
+    
+    subject.id <- json.data[["sub_uri"]]
+    
+    # On ne considère pas les synonymes car ils ne sont pas envoyé au modèle.
+    subject.label <- json.data[["sub_label"]]
+    
+        
+    out[index, "subject.id"] <- subject.id
+    out[index, "subject.label"] <- subject.label
+  }
+  return(out)
+}
 
 ```
 
@@ -389,6 +490,7 @@ full <- ggarrange(p1, p3, p2, p4,
                   font.label = list(size = 20, color = "black", face = "bold", family = NULL), 
                   common.legend = T, 
                   legend = "right", ncol = 2, nrow = 2)
+
 ```
 
 ```{r}
@@ -409,7 +511,7 @@ test_data <- c("../Exp-Taxa-NP-ANALYSES/data/np/triples_processed/P703/test.json
 # get the leakage data
 ```{r}
 # limite de la taille du prefixed commun
-LCP_limit <- 10
+LCP_limit <- 5
 test_data_P703 <- read_test_data(test_data[1])
 test_data_P703$prop <- "P703"
 
@@ -428,7 +530,7 @@ LCP_for_join %>% group_by(prop) %>% summarise(size.leakage.set = n_distinct(subj
 ```{r}
 opti_big.df %>% mutate(prop = str_split(ref, "-", simplify = T)[, 1]) %>% 
   left_join(LCP_for_join, by = c("prop", "subject.id")) %>% 
-  mutate(ObjectLeaked = LCP >= LCP_limit) %>% 
+  mutate(ObjectLeaked = LCP >= 2) %>% 
   group_by(ref, ObjectLeaked, seed) %>%
   summarise(Acc5 = signif((n_distinct(subject.id[is.correct==T & preds.rank <= 5]) / n_distinct(subject.id)) * 100, 2)) %>%
   group_by(ref, ObjectLeaked) %>%
@@ -439,13 +541,22 @@ opti_big.df %>% mutate(prop = str_split(ref, "-", simplify = T)[, 1]) %>%
 - for manual
 ```{r}
 
-manual_big.df %>% mutate(prop = str_split(ref, "-", simplify = T)[, 1]) %>% 
-  left_join(LCP_for_join, by = c("prop", "subject.id")) %>% 
-  mutate(ObjectLeaked = LCP >= LCP_limit) %>% 
-  group_by(ref, ObjectLeaked) %>% summarise("Acc@5" = signif((n_distinct(subject.id[is.correct==T & preds.rank <= 5]) / n_distinct(subject.id)) * 100, 2)) %>%
-  DT::datatable()
+opti_big.df %>% filter(is.correct) %>% mutate(prop = str_split(ref, "-", simplify = T)[, 1]) %>% 
+  left_join(LCP_for_join, by = c("prop", "subject.id"))
 ```
 
+## AVEC le test de permutation.
+
+```{r}
+labels_P703 <- get_table_labels(test_data[1])
+labels_P703$prop <- "P703"
+labels_rP703 <- get_table_labels(test_data[2])
+labels_rP703$prop <- "rP703"
+
+subject2labels <- rbind(labels_P703, labels_rP703)
+
+cc <- LCP_permutation_test(opti_big.df, subject2labels)
+```
 
 
 * * *
@@ -481,6 +592,66 @@ opti_correcte_preds_and_freq %>% group_by(ref) %>% summarise(median = median(fre
 
 
 ```
+
+
+
+Et si on essayais de savoir si les predictions correctes était soient des trucs fréquent et/ou juste du LCP
+
+```{r}
+labels_P703 <- get_table_labels(test_data[1])
+labels_P703$prop <- "P703"
+labels_rP703 <- get_table_labels(test_data[2])
+labels_rP703$prop <- "rP703"
+
+subject2labels <- rbind(labels_P703, labels_rP703)
+```
+
+
+Pour opti:
+```{r}
+
+get_class_of_preds <- function(data, subject2labels, LCP_LIMIT){
+
+data <- data %>% mutate(prop = str_split(ref, "-", simplify = T)[, 1])
+data_for_table <- data %>% filter(is.correct) %>% left_join(subject2labels, by = c("subject.id", "prop"))
+
+
+data_for_table$LCP <- apply((data_for_table %>% select(subject.label, preds.label)), 1, FUN = function(x){compute_pred_LCP(x[1], x[2])})
+data_for_table$test_LCP <- as.integer(data_for_table$LCP >= LCP_LIMIT)
+
+top_answers <- rbind( (data %>% filter(is.correct, prop == "P703") %>% group_by(preds.label) %>% summarise(n = n()) %>% slice_max(order_by = n, n = 5)), 
+                      (data %>% filter(is.correct, prop == "rP703") %>% group_by(preds.label) %>% summarise(n = n()) %>% slice_max(order_by = n, n = 1)))
+
+print(top_answers)
+
+data_for_table$test_freq <- as.integer(data_for_table$preds.label %in% top_answers$preds.label)
+
+data_for_table <- data_for_table %>% mutate(Class = paste0(test_freq, test_LCP))
+data_for_table$Class <- factor(data_for_table$Class, levels = c("00", "10", "01", "11"), labels = c("Original", "Top-Freq", "Leak", "Top-Freq & Leak"))
+
+return(list(data_for_table, (data_for_table %>% group_by(prop, Class) %>% summarise(n = n()) %>% group_by(prop) %>% mutate(p = round(n / sum(n) * 100, 2) ))))
+
+}
+
+LCP_LIMIT <- 5
+manual <- get_class_of_preds(manual_big.df, subject2labels, LCP_LIMIT)
+opti <- get_class_of_preds(opti_big.df, subject2labels, LCP_LIMIT)
+
+data_for_plot <- rbind( (manual[[2]] %>% mutate(Exp = "Manual*")), (opti[[2]] %>% mutate(Exp = "Opti*")) )
+data_for_plot <- data_for_plot %>% mutate(label = paste("(", p, " %)"))
+
+data_for_plot %>% 
+  ggplot(aes(x = Exp, y = p, fill = Class, label = label)) + 
+  geom_bar(stat = "identity", position = "stack") +
+  theme_classic() +
+  geom_text(size = 6, position = position_stack(vjust = 0.5)) +
+  theme(axis.text = element_text(size = 20, colour="black"), text = element_text(size = 15, colour="black")) +
+  facet_grid(. ~ prop) +
+    scale_fill_brewer(palette="Set1")
+
+data_for_plot %>% group_by(prop, Exp) %>% summarise(N = sum(n))
+```
+
 
 
 
