@@ -192,7 +192,7 @@ frequency_of_object_in_train_data <- function(path){
       # first time we meet this id ?
         if (! uri %in% names_to_id) {
             
-            for (name  in c(json.data[["obj_labels"]][i], unlist(json.data[["obj_aliases"]][i]) )) {
+            for (name  in c(json.data[["obj_labels"]][i] , unlist(json.data[["obj_aliases"]][i]))) { # 
               names_to_id[[name_normalise(name)]] <- uri
             }
             id_to_count[[uri]] <- 1
@@ -208,6 +208,28 @@ frequency_of_object_in_train_data <- function(path){
   
 }
 
+
+get_objectlabels_freq_in_dataset <- function(path){
+
+  lines <- readLines(path, ok = T, warn = F)
+  
+  N <- length(lines)
+  print(paste("Number of examples:", N))
+  v_obj.labels <- c()
+  
+  for(index in 1:N){
+    
+    line <- lines[index]
+    
+    json.data <- fromJSON(line)
+    
+    v_obj.labels <- c(v_obj.labels, json.data[["obj_labels"]])
+    
+  }
+  out <- data.frame(obj.label = v_obj.labels)
+  out <- out %>% group_by(obj.label) %>% summarise(n = n(), f = (n()/N) * 100 )
+  return(out)
+}
 
 
 bias_from_training_dataset <- function(path_to_train, l_train, bif.df, ref, top=5){
@@ -295,7 +317,7 @@ LCP_permutation_test <- function(preds, subject2labels, nsims){
       
       correct.preds <- correct.preds %>% select(subject.label, preds.label)
       
-      LCPs <- apply(correct.preds, 1, FUN = function(x){LCP(x[1], x[2])})
+      LCPs <- apply(correct.preds, 1, FUN = function(x){compute_pred_LCP(x[1], x[2])})
       AVG.LCP <- mean(LCPs)
       MED.LCP <- median(LCPs)
       MIN.LCP <- min(LCPs)
@@ -305,7 +327,7 @@ LCP_permutation_test <- function(preds, subject2labels, nsims){
         # print(paste("sim: ", i))
         correct.preds$subject.label <- sample(correct.preds$subject.label)
         correct.preds$preds.label <- sample(correct.preds$preds.label)
-        avg.sim.LCP <- mean(apply(correct.preds, 1, FUN = function(x){LCP(x[1], x[2])}))
+        avg.sim.LCP <- mean(apply(correct.preds, 1, FUN = function(x){compute_pred_LCP(x[1], x[2])}))
         if(avg.sim.LCP > AVG.LCP){
           nge <- nge + 1
         }
@@ -346,6 +368,27 @@ get_table_labels <- function(path){
   return(out)
 }
 
+
+get_object_labels <- function(path){
+  
+  lines <- readLines(path, ok = T, warn = F)
+  
+  N <- length(lines)
+  
+  obj_labels <- c() 
+
+  for(index in 1:N){
+    
+    line <- lines[index]
+    
+    json.data <- fromJSON(line)
+    
+    obj_labels <- c(obj_labels, c(json.data[["obj_labels"]], unlist(json.data[["obj_aliases"]])))
+    
+  }
+  return(unique(obj_labels))
+  
+}
 ```
 
 
@@ -555,7 +598,7 @@ labels_rP703$prop <- "rP703"
 
 subject2labels <- rbind(labels_P703, labels_rP703)
 
-cc <- LCP_permutation_test(opti_big.df, subject2labels)
+cc <- LCP_permutation_test(opti_big.df, subject2labels, 100)
 ```
 
 
@@ -593,7 +636,7 @@ opti_correcte_preds_and_freq %>% group_by(ref) %>% summarise(median = median(fre
 
 ```
 
-
+* * *
 
 Et si on essayais de savoir si les predictions correctes était soient des trucs fréquent et/ou juste du LCP
 
@@ -606,36 +649,88 @@ labels_rP703$prop <- "rP703"
 subject2labels <- rbind(labels_P703, labels_rP703)
 ```
 
+```{r}
+P703_obj_labels <- get_object_labels(test_data[1])
+rP703_obj_labels <- get_object_labels(test_data[2])
+obj_labels <- c(P703_obj_labels, rP703_obj_labels)
+```
+
+```{r}
+topk <- 5
+# Les top answers correspondent aux objets les plus frequement prédits par le modèle. On ne considère QUE les prédiction qui correspondent vraiment à des objects.. pas les "also" etc ...
+manual_top_answers <- rbind( (manual_big.df %>% mutate(prop = str_split(ref, "-", simplify = T)[, 1]) %>% filter(prop == "P703") %>% group_by(preds.label) %>% summarise(n = n()) %>% filter(preds.label %in% tolower(obj_labels)) %>% slice_max(order_by = n, n = topk)),
+                             (manual_big.df %>% mutate(prop = str_split(ref, "-", simplify = T)[, 1]) %>% filter(prop == "rP703") %>% group_by(preds.label) %>% summarise(n = n()) %>% filter(preds.label %in% tolower(obj_labels)) %>% slice_max(order_by = n, n = topk)))
+opti_top_answers <- rbind( (opti_big.df %>% mutate(prop = str_split(ref, "-", simplify = T)[, 1]) %>% filter(prop == "P703") %>% group_by(preds.label) %>% summarise(n = n()) %>% filter(preds.label %in% tolower(obj_labels)) %>% slice_max(order_by = n, n = topk)),
+                           (opti_big.df %>% mutate(prop = str_split(ref, "-", simplify = T)[, 1]) %>% filter(prop == "rP703") %>% group_by(preds.label) %>% summarise(n = n()) %>% filter(preds.label %in% tolower(obj_labels)) %>% slice_max(order_by = n, n = topk)))
+
+# On calcule les frequence pour manual
+manual_top_answers$avg_freq_in_preds <- NA
+manual_top_answers[1:topk, ]$avg_freq_in_preds <- (manual_top_answers[1:topk, ]$n * 100) / 1934
+manual_top_answers[topk:nrow(manual_top_answers), ]$avg_freq_in_preds <- (manual_top_answers[topk:nrow(manual_top_answers), ]$n * 100) / 500 
+
+# On calcule les frequence pour opti, mais ici on tiens en compte du nombre de seeds:
+opti_top_answers$avg_freq_in_preds <- NA
+opti_top_answers[1:topk, ]$avg_freq_in_preds <- (opti_top_answers[1:topk, ]$n * 100) / (1934 * 5)
+opti_top_answers[topk:nrow(manual_top_answers), ]$avg_freq_in_preds <- (opti_top_answers[topk:nrow(opti_top_answers), ]$n * 100) / (500 * 5) 
+
+
+P703_freq_in_test <- get_objectlabels_freq_in_dataset(test_data[1])
+# WARNING: On rename par preds.label juste pour le join !
+colnames(P703_freq_in_test) <- c("preds.label", "n_in_test", "freq_in_test")
+
+rP703_freq_in_test <- get_objectlabels_freq_in_dataset(test_data[2])
+colnames(rP703_freq_in_test) <- c("preds.label", "n_in_test", "freq_in_test")
+
+freq_in_test <- rbind(P703_freq_in_test, rP703_freq_in_test)
+freq_in_test$preds.label <- tolower(freq_in_test$preds.label)
+
+P703_freq_in_train <- get_objectlabels_freq_in_dataset("../Exp-Taxa-NP-ANALYSES/data/np/triples_processed/P703/big_train.jsonl")
+colnames(P703_freq_in_train) <- c("preds.label", "n_in_train", "freq_in_train")
+
+rP703_freq_in_train <- get_objectlabels_freq_in_dataset("../Exp-Taxa-NP-ANALYSES/data/np/triples_processed/rP703/big_train.jsonl")
+colnames(rP703_freq_in_train) <- c("preds.label", "n_in_train", "freq_in_train")
+
+freq_in_train <- rbind(P703_freq_in_train, rP703_freq_in_train)
+freq_in_train$preds.label <- tolower(freq_in_train$preds.label)
+
+manual_top_answers <- manual_top_answers %>% left_join(freq_in_test)
+opti_top_answers <- opti_top_answers %>% left_join(freq_in_test) %>% left_join(freq_in_train)
+                                                   
+```
+
+```{r}
+DT::datatable(manual_top_answers)
+```
+
+```{r}
+DT::datatable(opti_top_answers)
+```
+
 
 Pour opti:
 ```{r}
 
-get_class_of_preds <- function(data, subject2labels, LCP_LIMIT){
-
-data <- data %>% mutate(prop = str_split(ref, "-", simplify = T)[, 1])
-data_for_table <- data %>% filter(is.correct) %>% left_join(subject2labels, by = c("subject.id", "prop"))
-
-
-data_for_table$LCP <- apply((data_for_table %>% select(subject.label, preds.label)), 1, FUN = function(x){compute_pred_LCP(x[1], x[2])})
-data_for_table$test_LCP <- as.integer(data_for_table$LCP >= LCP_LIMIT)
-
-top_answers <- rbind( (data %>% filter(is.correct, prop == "P703") %>% group_by(preds.label) %>% summarise(n = n()) %>% slice_max(order_by = n, n = 5)), 
-                      (data %>% filter(is.correct, prop == "rP703") %>% group_by(preds.label) %>% summarise(n = n()) %>% slice_max(order_by = n, n = 1)))
-
-print(top_answers)
-
-data_for_table$test_freq <- as.integer(data_for_table$preds.label %in% top_answers$preds.label)
-
-data_for_table <- data_for_table %>% mutate(Class = paste0(test_freq, test_LCP))
-data_for_table$Class <- factor(data_for_table$Class, levels = c("00", "10", "01", "11"), labels = c("Original", "Top-Freq", "Leak", "Top-Freq & Leak"))
-
-return(list(data_for_table, (data_for_table %>% group_by(prop, Class) %>% summarise(n = n()) %>% group_by(prop) %>% mutate(p = round(n / sum(n) * 100, 2) ))))
+get_class_of_preds <- function(data, subject2labels, top_answers, LCP_LIMIT){
+  
+  data <- data %>% mutate(prop = str_split(ref, "-", simplify = T)[, 1])
+  data_for_table <- data %>% filter(is.correct) %>% left_join(subject2labels, by = c("subject.id", "prop"))
+  
+  
+  data_for_table$LCP <- apply((data_for_table %>% select(subject.label, preds.label)), 1, FUN = function(x){compute_pred_LCP(x[1], x[2])})
+  data_for_table$test_LCP <- as.integer(data_for_table$LCP >= LCP_LIMIT)
+  
+  data_for_table$test_freq <- as.integer(data_for_table$preds.label %in% top_answers$preds.label)
+  
+  data_for_table <- data_for_table %>% mutate(Class = paste0(test_freq, test_LCP))
+  data_for_table$Class <- factor(data_for_table$Class, levels = c("00", "10", "01", "11"), labels = c("Original", "Top-Freq", "Leak", "Top-Freq & Leak"))
+  
+  return(list(data_for_table, (data_for_table %>% group_by(prop, Class) %>% summarise(n = n()) %>% group_by(prop) %>% mutate(p = round(n / sum(n) * 100, 2) ))))
 
 }
 
 LCP_LIMIT <- 5
-manual <- get_class_of_preds(manual_big.df, subject2labels, LCP_LIMIT)
-opti <- get_class_of_preds(opti_big.df, subject2labels, LCP_LIMIT)
+manual <- get_class_of_preds(manual_big.df, subject2labels, manual_top_answers, LCP_LIMIT)
+opti <- get_class_of_preds(opti_big.df, subject2labels, opti_top_answers, LCP_LIMIT)
 
 data_for_plot <- rbind( (manual[[2]] %>% mutate(Exp = "Manual*")), (opti[[2]] %>% mutate(Exp = "Opti*")) )
 data_for_plot <- data_for_plot %>% mutate(label = paste("(", p, " %)"))
