@@ -18,7 +18,7 @@ library(DT)
 -> Alors j'ai du rajotuer une ligne à la fin pour que tous les blocks est bien une longueurs de 8 lignes.
 ```{r}
 
-path <- "output/np/opti2/summary_ACC.txt"
+path <- "output/np/opti3/summary_ACC.txt"
 block_l <- 8
 data <- data.frame()
 
@@ -76,8 +76,8 @@ parsed_data$prompt <- factor(parsed_data$prompt, levels = c("manual1", "manual2"
 
 ### On calcule la moyenne sur les 5 seeds.
 ```{r}
-save <- parsed_data
-parsed_data <- parsed_data %>% group_by(model, prompt, init, iter, property, accType) %>% summarise(acc = mean(acc), sd = sd(acc))
+colnames(parsed_data)[8] <-"s_acc"
+parsed_data <- parsed_data %>% group_by(model, prompt, init, iter, property, accType) %>% summarise(acc = mean(s_acc), sd = sd(s_acc))
 ```
 
 
